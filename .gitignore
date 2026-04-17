@@ -1,0 +1,52 @@
+# 환경변수 (절대 커밋 금지)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# ChromaDB 로컬 데이터
+chroma_data/
+
+# Google 서비스 계정 키
+*.json
+!package.json
+
+# ngrok 설정
+ngrok.yml
+
+# 로컬 AI 툴 설정 (개발자마다 다름)
+.omc/
+.code-review-graph/
+.claude/
+CLAUDE.md
+
+# docs
+docs/
+
+copy_*.py
