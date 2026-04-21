@@ -18,9 +18,16 @@ class Settings(BaseSettings):
     google_application_credentials: str = ""
 
     # PostgreSQL
+    postgres_user: str = "sisicallcall"
+    postgres_password: str = "changeme"
+    postgres_db: str = "sisicallcall"
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
     database_url: str = "postgresql://sisicallcall:changeme@localhost:5432/sisicallcall"
 
     # Redis
+    redis_host: str = "localhost"
+    redis_port: int = 6379
     redis_url: str = "redis://localhost:6379"
 
     # ChromaDB

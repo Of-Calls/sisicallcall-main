@@ -20,8 +20,16 @@ class ChromaRAGService:
         self, query_embedding: list[float], tenant_id: str, top_k: int = 3
     ) -> list[str]:
         """벡터 유사도 검색 — FAQ 브랜치 전용."""
-        # TODO: ChromaDB query 구현
-        return []
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+
+        def _query():
+            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            result = col.query(query_embeddings=[query_embedding], n_results=top_k)
+            return result["documents"][0] if result["documents"] else []
+
+        return await loop.run_in_executor(None, _query)
 
     async def upsert(
         self,
@@ -32,5 +40,44 @@ class ChromaRAGService:
         metadata: dict,
     ) -> None:
         """RAG 문서 저장 (소프트 삭제 시 ChromaDB 벡터 동시 삭제 필수)."""
-        # TODO: ChromaDB upsert 구현
-        pass
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+
+        def _upsert():
+            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col.upsert(
+                ids=[doc_id],
+                embeddings=[embedding],
+                documents=[content],
+                metadatas=[metadata],
+            )
+
+        await loop.run_in_executor(None, _upsert)
+        logger.info("chroma upsert doc_id=%s tenant=%s", doc_id, tenant_id)
+
+    async def delete(self, doc_id: str, tenant_id: str) -> None:
+        """소프트 삭제 시 ChromaDB 벡터 동시 삭제 (db_schema.md 규칙)."""
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+
+        def _delete():
+            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col.delete(ids=[doc_id])
+
+        await loop.run_in_executor(None, _delete)
+        logger.info("chroma delete doc_id=%s tenant=%s", doc_id, tenant_id)
+
+    async def delete_by_document(self, document_id: str, tenant_id: str) -> None:
+        """document_id에 속한 모든 청크 삭제 — 문서 교체/삭제 시 사용."""
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+
+        def _delete():
+            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col.delete(where={"document_id": {"$eq": document_id}})
+
+        await loop.run_in_executor(None, _delete)
+        logger.info("chroma delete_by_document document_id=%s tenant=%s", document_id, tenant_id)

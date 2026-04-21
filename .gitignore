@@ -49,4 +49,8 @@ CLAUDE.md
 # docs
 docs/
 
+# 테스트 데이터 파일
+tests/*.pdf
+tests/*.md
+
 copy_*.py

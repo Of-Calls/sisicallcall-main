@@ -21,7 +21,7 @@ deepgram-sdk==3.7.0
 google-cloud-texttospeech==2.17.2
 
 # Embedding / Vector DB
-chromadb==0.5.11
+chromadb==0.5.23
 
 # Database
 asyncpg==0.29.0
@@ -49,3 +49,6 @@ httpx==0.27.2
 
 # Utils
 python-multipart==0.0.12
+
+# PDF Processing
+pdfplumber==0.11.4
