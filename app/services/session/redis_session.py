@@ -50,3 +50,17 @@ class RedisSessionService:
     async def clear(self, call_id: str) -> None:
         """통화 종료 시 세션 삭제."""
         await self._client.delete(self._key(call_id))
+
+    async def set_auth_id(self, call_id: str, auth_id: str) -> None:
+        """auth_branch 가 SMS 발송 후 통화 세션에 auth_id 기록 — 재진입 시 폴링용."""
+        view = await self.load(call_id)
+        view["auth_id"] = auth_id
+        await self._client.set(
+            self._key(call_id),
+            json.dumps(view, ensure_ascii=False),
+            ex=_TTL_SECONDS,
+        )
+
+    async def get_auth_id(self, call_id: str) -> str | None:
+        view = await self.load(call_id)
+        return view.get("auth_id")
