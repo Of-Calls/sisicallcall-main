@@ -33,7 +33,7 @@ TOOL_CATALOG: dict[str, dict] = {
     },
     "schedule_callback": {
         "tool": "calendar",
-        "description": "콜백 통화 일정을 예약",
+        "description": "통화/방문 일정 예약 (식당 좌석 예약, 진료 예약, 상담 콜백 등 모든 일정 예약 포함)",
         "requires_auth": False,
         "parameters": {
             "type": "object",

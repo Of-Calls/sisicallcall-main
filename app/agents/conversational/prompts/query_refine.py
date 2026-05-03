@@ -8,6 +8,8 @@ industry_context 의 label/facility_hint 와 _QUERY_REFINE_EXAMPLES 의 industry
 - "별관/응급실/민원실" 같은 도메인 시설 발화 → industry 별 라벨로 자연 컨텍스트화
 - "이 매장" 토큰이 단일 테넌트 가정의 잔재였음
 """
+from datetime import datetime
+
 from app.agents.conversational.prompts.industry_context import get_context
 
 _QUERY_REFINE_EXAMPLES: dict[str, list[str]] = {
@@ -51,8 +53,13 @@ def build_system_prompt(tenant_name: str, tenant_industry: str) -> str:
     label = ctx["label"]
     facility_hint = ctx["facility_hint"]
     industry_examples = _format_examples(_QUERY_REFINE_EXAMPLES.get(tenant_industry, []))
+    today = datetime.now().strftime("%Y-%m-%d (%a)")
 
     return f"""당신은 전화 상담 AI의 쿼리 재작성기입니다.
+
+[현재 날짜]
+오늘은 {today} 입니다. "이번주 토요일", "내일 오후 3시" 같은 시간 표현은
+위 오늘 날짜 기준 절대 시각 (YYYY-MM-DD HH:MM) 으로 변환해서 rewritten_query 에 포함하세요.
 
 [전화 상담 컨텍스트 — 중요]
 사용자는 "{tenant_name}" ({label}) 에 전화 중입니다.
@@ -85,6 +92,8 @@ def build_system_prompt(tenant_name: str, tenant_industry: str) -> str:
 없어도 무조건 is_clear=true 로 통과시키세요. 정보 수집은 다음 단계의 역할입니다.
 - "예약할게요" → (날짜 없어도) is_clear=true, rewritten_query="예약 요청"
 - "상담원 연결해주세요" → (이유 없어도) is_clear=true, rewritten_query="상담원 연결 요청"
+- "내 회원정보 알려주세요" → (어떤 카테고리 안 물어도) is_clear=true, rewritten_query="회원정보 조회 요청"
+- "내 등급 알려주세요" → is_clear=true, rewritten_query="회원 등급 조회 요청"
 
 [핵심 규칙 2 — 지시대명사 우선 예외 룰 (매우 중요)]
 "거기", "여기", "그쪽" 등 장소를 지칭하는 단어는 대화 기록을 찾을 필요 없이
@@ -103,6 +112,15 @@ def build_system_prompt(tenant_name: str, tenant_industry: str) -> str:
 - 직전 AI 가 같은 polite 제안에 사용자: "네"
   → rewritten_query: "사용자가 [제안 내용]에 동의함" (is_clear=true)
 - 직전 AI 가 일반 정보 안내였고 사용자: "네/아니요" → 의도 모호 (is_clear=false)
+
+[핵심 규칙 4 — 음성 오타 추정 (STT 오류 보정)]
+사용자 발화는 음성 인식(STT) 결과라 발음 비슷한 단어가 잘못 인식됐을 수 있다.
+이 {label} 자주 쓰는 용어 ({facility_hint} 또는 영업/예약/문의 등) 와 발음이
+비슷한 단어가 보이면 보정해서 self-contained 쿼리로 만들고 is_clear=true 로 통과시키세요.
+- 예: 식당 + "미누가 어떻게 되죠" → rewritten_query: "이 식당 메뉴 문의" (is_clear=true)
+- 예: 병원 + "내가 진료" → rewritten_query: "이 병원 내과 진료 문의" (is_clear=true)
+- 예: 관공서 + "민언 신청" → rewritten_query: "이 관공서 민원 신청 문의" (is_clear=true)
+보정 후보가 명확하지 않으면 무리하게 추측하지 말고 is_clear=false 로 보내 clarify 가 처리하게 하세요.
 
 [일반 규칙]
 - 그 외의 지시대명사("그거", "저거", "이거") → 이전 대화에서 referent 찾아 치환

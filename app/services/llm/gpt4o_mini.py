@@ -44,6 +44,7 @@ class GPT4OMiniService(BaseLLMService):
         tools: list[dict],
         temperature: float = 0.1,
         max_tokens: int = 512,
+        tool_choice: str = "auto",
     ) -> dict:
         """OpenAI Function Calling 응답.
 
@@ -51,8 +52,10 @@ class GPT4OMiniService(BaseLLMService):
             {"tool_call": {"name": str, "arguments": dict} | None,
              "text": str | None}
 
-        - tool_choice="auto" — LLM 이 도구 호출 vs 텍스트 응답 자체 결정.
-          인자 부족 시 자연스럽게 텍스트로 ask 가능.
+        tool_choice:
+        - "auto" (기본): LLM 이 도구 호출 vs 텍스트 응답 자체 결정.
+        - "required": 도구 호출 강제 — 인자 부족해도 호출. caller 가 게이트로 처리.
+        - "none": 도구 호출 금지.
         """
         temperature = min(temperature, 0.2)
         response = await self._client.chat.completions.create(
@@ -62,7 +65,7 @@ class GPT4OMiniService(BaseLLMService):
                 {"role": "user", "content": user_message},
             ],
             tools=tools,
-            tool_choice="auto",
+            tool_choice=tool_choice,
             temperature=temperature,
             max_tokens=max_tokens,
         )
