@@ -108,6 +108,15 @@ class Settings(BaseSettings):
     vision_metadata_path: str = "models/water_purifier_convnextv2_femto_metadata.json"
     vision_device: str = "auto"
 
+    # FAQ 시맨틱 캐시 (faq_branch 전용)
+    # ChromaDB L2 squared distance (BGE-M3 normalized, L2sq = 2(1-cos_sim)).
+    # 0.04 (cos_sim ≥ 0.98) — 진단 결과 (8 paraphrase + 8 unrelated) 에서
+    # false hit 0%, paraphrase 25% hit. 짧은 의문문/도메인 단어 묶임 발화는
+    # BGE-M3 가 표면 매칭으로 unrelated 도 cos 0.97 까지 끌어올려서 위험.
+    # 긴 task/예약 발화 (cos 0.99+) 위주로 캐시 효과. miss 시 RAG fallthrough 정답 보장.
+    cache_distance_threshold: float = 0.04
+    cache_ttl_seconds: int = 86400  # 24h
+
     # extra="ignore" — .env 에 코드에서 제거된 잔여 키(예: 과거 GOOGLE_APPLICATION_CREDENTIALS)
     # 가 있어도 ValidationError 로 죽지 않게. 신규 키는 위 클래스 필드로 명시 정의 필요.
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

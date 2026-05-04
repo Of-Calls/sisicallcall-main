@@ -1,10 +1,12 @@
 from app.agents.conversational.state import CallState
+from app.services.cache import get_cache
 from app.services.embedding import get_embedder
 from app.services.llm.gpt4o_mini import GPT4OMiniService
 from app.services.rag.chroma import ChromaRAGService
 
 _llm = GPT4OMiniService()
 _rag = ChromaRAGService()
+_cache = get_cache()
 
 _TOP_K = 3
 # ChromaDB default L2 distance (BGE-M3 normalized) — 작을수록 유사.
@@ -41,11 +43,17 @@ async def faq_branch_node(state: CallState) -> dict:
         print("[faq_branch] 거절 패턴 감지 → polite decline")
         return {"response_text": _POLITE_DECLINE_FALLBACK}
 
-    # 1. 임베딩
+    # 1. 임베딩 (캐시 + RAG 공유)
     embedder = get_embedder()
     embedding = await embedder.embed(query)
 
-    # 2. RAG 검색
+    # 2. 캐시 조회 — hit 시 LLM/RAG 둘 다 skip
+    cache_hit = await _cache.lookup(tenant_id, embedding)
+    if cache_hit:
+        print(f"[faq_branch] cache hit distance={cache_hit.distance:.4f}")
+        return {"response_text": cache_hit.response_text}
+
+    # 3. RAG 검색 (같은 임베딩 재사용)
     results = await _rag.search_with_meta(embedding, tenant_id, top_k=_TOP_K)
     print(f"[faq_branch] query='{query}' results={len(results)}")
     for i, r in enumerate(results):
@@ -122,6 +130,9 @@ async def faq_branch_node(state: CallState) -> dict:
         text = text.strip().strip('"').strip("'")
         if not text:
             text = _POLITE_NO_RESULT
+        else:
+            await _cache.save(tenant_id, query, embedding, text)
+            print("[faq_branch] cache save")
     except Exception as exc:
         print(f"[faq_branch] LLM 실패 → fallback: {exc}")
         text = _POLITE_NO_RESULT
