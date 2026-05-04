@@ -25,8 +25,9 @@ _POLITE_SMS_SENT = (
     "어떤 정수기인지 확인할 수 있도록 휴대폰으로 사진 업로드 링크를 보내드렸어요. "
     "링크를 열어 사진을 업로드해주세요."
 )
-_POLITE_IN_PROGRESS = "사진을 분석 중이에요. 잠시만 기다려주세요."
-_POLITE_FAILED = "사진 인식이 잘 안 됐어요. 다시 한 번 보내주실 수 있을까요?"
+_POLITE_NOT_RECEIVED = "아직 사진이 도착하지 않았어요. 업로드 후 다시 알려주세요."
+_POLITE_ANALYZING = "사진을 분석 중이에요. 잠시만 기다려주세요."
+_POLITE_FAILED = "죄송해요, 사진 분석에 문제가 생겼어요. 상담원으로 연결해드릴게요."
 _POLITE_NO_RESULT = "해당 모델 정보를 찾기 어려워요. 매장으로 문의해주시면 자세히 안내드릴게요."
 
 _VISION_HUMANIZE_PROMPT = """당신은 매장 전화 상담 AI 입니다.
@@ -145,8 +146,12 @@ async def vision_branch_node(state: CallState) -> dict:
             text = await _humanize_with_rag(label, tenant_id)
             return {"response_text": text}
         if status == "failed":
+            # 새 사이클 가능하도록 정리. 실제 escalation 라우팅은 escalation 노드 구현 시점.
+            await _call_session_svc.clear_vision_id(call_id)
             return {"response_text": _POLITE_FAILED}
-        # pending / analyzing / 그 외 → 진행 중 안내
-        return {"response_text": _POLITE_IN_PROGRESS}
+        if status == "analyzing":
+            return {"response_text": _POLITE_ANALYZING}
+        # pending / 그 외 → 사진 미수신 안내
+        return {"response_text": _POLITE_NOT_RECEIVED}
 
     return await _create_new_vision(call_id, tenant_id, customer_phone)

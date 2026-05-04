@@ -11,6 +11,9 @@ _TOP_K = 3
 # 분포: 매우 관련 0.6~0.8, 약 관련 0.8~1.0, 무관 1.0+ (max √2 ≈ 1.41).
 # 0.85 — 한밭식당 검증 결과 정확히 매칭되는 청크는 0.6~0.85 범위에 분포.
 _DIST_THRESHOLD = 0.85
+# vision 게이트는 모델 식별 필요 신호만 잡으면 됨 — 일반 humanize 보다 느슨한 기준.
+# 0.95 — model_spec 청크가 top_k 안에 들어왔다는 사실 자체가 강한 신호.
+_VISION_GATE_THRESHOLD = 0.95
 
 _POLITE_AUTH = "본인 인증이 필요한 정보예요. 인증 진행해드릴까요?"
 _POLITE_VISION = "확인하시려는 게 어떤 건지 사진으로 봐야 정확히 안내드릴 수 있어요. 사진 보내주실 수 있을까요?"
@@ -66,10 +69,16 @@ async def faq_branch_node(state: CallState) -> dict:
         print("[faq_branch] is_auth=True 청크 발견 (threshold 이내) → polite auth")
         return {"response_text": _POLITE_AUTH}
 
-    # is_vision 게이트 — 청크의 model_id 가 사용자 발화에 명시되지 않은 경우만 폴리트 vision.
-    # 모델 명시 시 게이트 우회하여 정상 RAG humanize 진행 (예: "B1 사양 알려주세요").
+    # is_vision 게이트 — 별도 threshold (0.95) 로 results 전체 검사.
+    # 모델 식별 필요 query 는 일반 humanize 보다 느슨하게 잡아야 함 (모델 사양 청크가
+    # top_k 안에 들어왔다는 것 자체가 강한 신호).
+    # 매칭 검사는 user_text (raw) + rewritten_query (history 기반 추론) 둘 다.
+    rewritten = state.get("rewritten_query") or ""
     vision_chunks = [
-        r for r in related if (r.get("metadata") or {}).get("is_vision", False)
+        r for r in results
+        if r.get("distance") is not None
+        and r["distance"] <= _VISION_GATE_THRESHOLD
+        and (r.get("metadata") or {}).get("is_vision", False)
     ]
     if vision_chunks:
         candidate_ids = {
@@ -77,19 +86,19 @@ async def faq_branch_node(state: CallState) -> dict:
             for r in vision_chunks
         }
         candidate_ids = {mid for mid in candidate_ids if mid}
-        user_text_upper = user_text.upper()
+        search_text = f"{user_text} {rewritten}".upper()
         matched = any(
-            mid and mid.upper() in user_text_upper for mid in candidate_ids
+            mid and mid.upper() in search_text for mid in candidate_ids
         )
         if not matched:
             print(
-                f"[faq_branch] is_vision 청크 발견 candidates={candidate_ids} "
-                f"user_text 매칭 X → polite vision"
+                f"[faq_branch] is_vision 청크 발견 (threshold {_VISION_GATE_THRESHOLD}) "
+                f"candidates={candidate_ids} 매칭 X → polite vision"
             )
             return {"response_text": _POLITE_VISION}
         print(
             f"[faq_branch] is_vision 청크 발견 candidates={candidate_ids} "
-            f"user_text 에 모델 명시 → 게이트 우회"
+            f"발화/재작성에 모델 명시 → 게이트 우회"
         )
 
     # threshold 통과 청크가 없으면 LLM 환각 차단 — 즉시 NO_RESULT.

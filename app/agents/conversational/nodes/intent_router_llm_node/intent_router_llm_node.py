@@ -1,8 +1,12 @@
 from app.agents.conversational.state import CallState
 from app.agents.conversational.prompts.intent_router import build_system_prompt
 from app.services.llm.gpt4o_mini import GPT4OMiniService
+from app.services.session.redis_session import RedisSessionService
+from app.services.vision.session import VisionSessionService
 
 _llm = GPT4OMiniService()
+_call_session_svc = RedisSessionService()
+_vision_session_svc = VisionSessionService()
 _HISTORY_TURN_LIMIT = 6  # 직전 3턴 (user+assistant 합쳐 6개 항목)
 
 _VALID_INTENTS = {"faq", "task", "auth", "vision", "escalation"}
@@ -21,9 +25,24 @@ def _format_history(history: list) -> str:
 async def intent_router_llm_node(state: CallState) -> dict:
     # query_refine 이 만든 self-contained 쿼리 우선. 없으면 원본 fallback.
     query = state.get("rewritten_query") or state["user_text"]
+    call_id = state["call_id"]
     history = state.get("session_view", {}).get("conversation_history", [])
     tenant_name = state.get("tenant_name", "고객센터")
     tenant_industry = state.get("tenant_industry", "unknown")
+
+    # Active vision 세션 short-circuit — pending/analyzing 상태면 사용자 발화가 무엇이든
+    # vision 으로 강제 라우팅. "업로드됐나요", "링크 보냈잖아요" 등 vision 컨텍스트의
+    # 다양한 발화 변형을 LLM 분류에 맡기지 않고 안정 처리. analyzed/없음 시는 일반 분류.
+    vision_id = await _call_session_svc.get_vision_id(call_id)
+    if vision_id:
+        vsession = await _vision_session_svc.get_session(vision_id)
+        if vsession:
+            vstatus = vsession.get("status", "")
+            if vstatus in ("pending", "analyzing"):
+                print(
+                    f"[intent_router] active vision (status={vstatus}) → vision 강제"
+                )
+                return {"intent": "vision"}
 
     system_prompt = build_system_prompt(tenant_name, tenant_industry)
     user_message = f"[이전 대화]\n{_format_history(history)}\n\n[현재 사용자 발화]\n{query}"
