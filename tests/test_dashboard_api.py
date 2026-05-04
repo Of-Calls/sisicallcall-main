@@ -17,6 +17,7 @@ import app.repositories.voc_analysis_repo as voc_mod
 import app.repositories.mcp_action_log_repo as action_mod
 import app.repositories.dashboard_repo as dashboard_mod
 
+from app.api.v1.admin_auth import get_current_admin_user
 from app.api.v1.dashboard import router as dashboard_router
 
 from tests.fixtures.sample_transcripts import (
@@ -32,11 +33,42 @@ _app = FastAPI()
 _app.include_router(dashboard_router, prefix="/dashboard")
 _client = TestClient(_app)
 
+DEFAULT_TENANT_ID = "tenant-a"
+
+
+def _admin_context(tenant_id: str = DEFAULT_TENANT_ID) -> dict:
+    return {
+        "user": {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "tenant_id": tenant_id,
+            "email": "admin@example.test",
+            "name": "Test Admin",
+            "role": "owner",
+            "is_active": True,
+        },
+        "tenant": {
+            "id": tenant_id,
+            "name": "Test Tenant",
+            "industry": "test",
+            "plan": "basic",
+            "twilio_number": "+821000000000",
+            "is_active": True,
+        },
+    }
+
+
+def _set_current_tenant(tenant_id: str = DEFAULT_TENANT_ID) -> None:
+    async def fake_current_admin_user():
+        return _admin_context(tenant_id)
+
+    _app.dependency_overrides[get_current_admin_user] = fake_current_admin_user
+
 
 # ── Store 격리 픽스처 ─────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
 def reset_stores():
+    _set_current_tenant()
     summary_mod._reset()
     voc_mod._reset()
     action_mod._reset()
@@ -46,6 +78,7 @@ def reset_stores():
     voc_mod._reset()
     action_mod._reset()
     dashboard_mod._reset()
+    _set_current_tenant()
 
 
 # ── 시딩 헬퍼 ────────────────────────────────────────────────────────────────
@@ -106,13 +139,13 @@ def test_get_dashboard_stats():
     for key in required_keys:
         assert key in data, f"응답에 {key!r} 가 없음"
 
-    assert data["total_calls"] == 3
-    assert data["resolved_count"] == 2       # resolved_neutral + negative_repeated
+    assert data["total_calls"] == 2
+    assert data["resolved_count"] == 1       # resolved_neutral
     assert data["escalated_count"] >= 1      # angry_critical (trigger=escalation_immediate)
-    assert data["action_required_count"] == 2  # angry + negative
-    assert data["mcp_success_count"] == 3    # angry(2) + negative(1)
-    assert data["mcp_failed_count"] == 1     # negative(1)
-    assert data["partial_success_count"] == 1  # negative_repeated
+    assert data["action_required_count"] == 1  # angry
+    assert data["mcp_success_count"] == 2    # angry(2)
+    assert data["mcp_failed_count"] == 0
+    assert data["partial_success_count"] == 0
 
 
 # ── 8. GET /dashboard/emotion-distribution 성공 ───────────────────────────────
@@ -126,7 +159,7 @@ def test_get_emotion_distribution():
     data = resp.json()
     assert data["neutral"] == 1
     assert data["angry"] == 1
-    assert data["negative"] == 1
+    assert data["negative"] == 0
     assert data["positive"] == 0
 
 
@@ -176,7 +209,7 @@ def test_get_action_logs():
     logs = resp.json()
     assert isinstance(logs, list)
     # angry(2) + negative(2) = 4 개
-    assert len(logs) == 4
+    assert len(logs) == 2
 
 
 # ── 11. tenant_id 필터 동작 ───────────────────────────────────────────────────
@@ -190,9 +223,8 @@ def test_stats_tenant_filter():
     assert resp_a.json()["total_calls"] == 2
 
     resp_b = _client.get("/dashboard/stats?tenant_id=tenant-b")
-    assert resp_b.status_code == 200
-    # tenant-b: negative_repeated = 1
-    assert resp_b.json()["total_calls"] == 1
+    assert resp_b.status_code == 403
+    assert resp_b.json()["detail"] == "tenant 정보가 일치하지 않습니다."
 
 
 def test_priority_queue_tenant_filter():
@@ -203,16 +235,15 @@ def test_priority_queue_tenant_filter():
     assert all(q["tenant_id"] == "tenant-a" for q in data)
 
     resp_b = _client.get("/dashboard/priority-queue?tenant_id=tenant-b")
-    data = resp_b.json()
-    assert all(q["tenant_id"] == "tenant-b" for q in data)
+    assert resp_b.status_code == 403
 
 
 def test_action_logs_tenant_filter():
-    _seed_action_logs("call-alpha", "tenant-alpha",
+    _seed_action_logs("call-alpha", "tenant-a",
                       [{"action_type": "a", "tool": "gmail",
                         "status": "success", "external_id": None,
                         "error": None, "result": {}, "params": {}}])
-    _seed_action_logs("call-beta", "tenant-beta",
+    _seed_action_logs("call-beta", "tenant-b",
                       [{"action_type": "b", "tool": "company_db",
                         "status": "success", "external_id": None,
                         "error": None, "result": {}, "params": {}},
@@ -220,11 +251,12 @@ def test_action_logs_tenant_filter():
                         "status": "failed", "external_id": None,
                         "error": "timeout", "result": {}, "params": {}}])
 
-    resp = _client.get("/dashboard/action-logs?tenant_id=tenant-alpha")
+    resp = _client.get("/dashboard/action-logs?tenant_id=tenant-a")
+    assert resp.status_code == 200
     assert len(resp.json()) == 1
 
-    resp = _client.get("/dashboard/action-logs?tenant_id=tenant-beta")
-    assert len(resp.json()) == 2
+    resp = _client.get("/dashboard/action-logs?tenant_id=tenant-b")
+    assert resp.status_code == 403
 
 
 # ── 12. 빈 저장소에서 기본값 안전 반환 ────────────────────────────────────────

@@ -73,6 +73,31 @@ async def test_get_summary_not_found():
     assert result is None
 
 
+@pytest.mark.asyncio
+async def test_get_summary_tenant_filter():
+    summary = {"summary_short": "tenant scoped", "customer_emotion": "neutral"}
+    await save_summary("call-tenant-001", "tenant-a", summary)
+
+    same_tenant = await get_summary_by_call_id("call-tenant-001", tenant_id="tenant-a")
+    other_tenant = await get_summary_by_call_id("call-tenant-001", tenant_id="tenant-b")
+
+    assert same_tenant is not None
+    assert same_tenant["tenant_id"] == "tenant-a"
+    assert other_tenant is None
+
+
+@pytest.mark.asyncio
+async def test_call_summary_repository_save_preserves_tenant_id():
+    repo = summary_mod.CallSummaryRepository()
+    summary = {"summary_short": "repository scoped", "customer_emotion": "neutral"}
+
+    await repo.save_summary("call-repo-tenant-001", summary, tenant_id="tenant-a")
+
+    same_tenant = await get_summary_by_call_id("call-repo-tenant-001", tenant_id="tenant-a")
+    assert same_tenant is not None
+    assert same_tenant["tenant_id"] == "tenant-a"
+
+
 # ── 2. save_voc_analysis / get_voc_by_call_id ────────────────────────────────
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ import app.repositories.mcp_action_log_repo as action_mod
 import app.repositories.dashboard_repo as dashboard_mod
 from app.repositories.call_summary_repo import _context_store as _ctx_store
 
+from app.api.v1.admin_auth import get_current_admin_user
 from app.api.v1.post_call import router as post_call_router
 from app.api.v1.summary import router as summary_router
 
@@ -33,6 +34,34 @@ _app = FastAPI()
 _app.include_router(post_call_router, prefix="/post-call")
 _app.include_router(summary_router, prefix="/summary")
 _client = TestClient(_app)
+
+
+def _summary_admin_context(tenant_id: str = "tenant-a") -> dict:
+    return {
+        "user": {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "tenant_id": tenant_id,
+            "email": "admin@example.test",
+            "name": "Test Admin",
+            "role": "owner",
+            "is_active": True,
+        },
+        "tenant": {
+            "id": tenant_id,
+            "name": "Test Tenant",
+            "industry": "test",
+            "plan": "basic",
+            "twilio_number": "+821000000000",
+            "is_active": True,
+        },
+    }
+
+
+async def _fake_current_admin_user():
+    return _summary_admin_context()
+
+
+_app.dependency_overrides[get_current_admin_user] = _fake_current_admin_user
 
 
 # ── Store 격리 픽스처 ─────────────────────────────────────────────────────────

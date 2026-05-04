@@ -73,7 +73,11 @@ async def save_result_node(state: PostCallAgentState) -> dict:
 
 async def _maybe_save_summary(call_id: str, state: PostCallAgentState) -> None:
     if state.get("summary"):  # type: ignore[call-overload]
-        await _summary_repo.save_summary(call_id, state["summary"])  # type: ignore[typeddict-item]
+        await _summary_repo.save_summary(
+            call_id,
+            state["summary"],  # type: ignore[typeddict-item]
+            tenant_id=state["tenant_id"],
+        )
 
 
 async def _maybe_save_voc(call_id: str, state: PostCallAgentState) -> None:

@@ -1,26 +1,33 @@
-"""
-SUMMARY API — 통화 요약 조회.
-
-KDT-79 통합 시 app/main.py 에 아래 라인을 추가한다:
-    from app.api.v1.summary import router as summary_router
-    app.include_router(summary_router, prefix="/summary", tags=["summary"])
-"""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from typing import Any
 
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from app.api.v1.admin_auth import get_current_admin_user
 from app.repositories import get_summary_by_call_id
 
 router = APIRouter()
 
 
-@router.get("/{call_id}")
-async def get_summary(call_id: str):
-    """call_id 에 해당하는 통화 요약을 반환한다.
+def _current_admin_tenant_id(current_admin: dict[str, Any]) -> str:
+    user = current_admin.get("user") or {}
+    tenant_id = str(user.get("tenant_id") or "").strip()
+    if not tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin tenant",
+        )
+    return tenant_id
 
-    저장된 summary 가 없으면 404 를 반환한다.
-    """
-    record = await get_summary_by_call_id(call_id)
+
+@router.get("/{call_id}")
+async def get_summary(
+    call_id: str,
+    current_admin: dict[str, Any] = Depends(get_current_admin_user),
+):
+    tenant_id = _current_admin_tenant_id(current_admin)
+    record = await get_summary_by_call_id(call_id, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(
             status_code=404,

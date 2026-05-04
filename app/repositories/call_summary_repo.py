@@ -57,9 +57,19 @@ async def save_summary(
     logger.debug("summary saved call_id=%s", call_id)
 
 
-async def get_summary_by_call_id(call_id: str) -> dict | None:
+async def get_summary_by_call_id(
+    call_id: str,
+    tenant_id: str | None = None,
+) -> dict | None:
     record = _summary_store.get(call_id)
-    return copy.deepcopy(record) if record is not None else None
+    if record is None:
+        return None
+    if tenant_id is not None:
+        record_tenant_id = str(record.get("tenant_id") or "").strip().lower()
+        expected_tenant_id = str(tenant_id).strip().lower()
+        if record_tenant_id != expected_tenant_id:
+            return None
+    return copy.deepcopy(record)
 
 
 async def seed_call_context(
@@ -109,8 +119,13 @@ class CallSummaryRepository:
         result = await get_call_context(call_id)
         return result or {}
 
-    async def save_summary(self, call_id: str, summary: dict) -> None:
-        await save_summary(call_id=call_id, tenant_id="", summary=summary)
+    async def save_summary(
+        self,
+        call_id: str,
+        summary: dict,
+        tenant_id: str = "",
+    ) -> None:
+        await save_summary(call_id=call_id, tenant_id=tenant_id, summary=summary)
 
     async def seed(self, call_id: str, context: dict) -> None:
         await seed_call_context(
