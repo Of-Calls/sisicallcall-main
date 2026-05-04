@@ -1,49 +1,3 @@
-"""
-얼굴 인증 테스트 웹 서버 (포트 3000).
-
-기존 코드 수정 없이 핸드폰에서 얼굴 인증 플로우를 테스트합니다.
-
-실행 순서:
-  1) 터미널 A — FastAPI 서버 시작
-       uvicorn app.main:app --reload
-
-  2) 터미널 B — 이 서버 시작
-       python scripts/auth_test_server.py
-
-  3) 터미널 C — ngrok HTTPS 터널 (카메라 권한은 HTTPS 필수)
-       ngrok http 3000
-
-  4) .env 수정 (ngrok URL 복사 후)
-       AUTH_WEB_BASE_URL=https://xxxx.ngrok-free.app
-
-  5) 인증 세션 생성 (얼굴 사진 사전 등록 필요)
-       python scripts/test_auth_flow.py scripts/myface.jpg +821047722480
-
-  6) 핸드폰 SMS 링크 클릭 → 브라우저에서 인증 진행
-
-주의:
-  - AUTH_ENABLE_TEST_REGISTER=true 가 .env 에 있어야 /auth/register 활성
-  - 운영 배포 시 이 서버는 절대 사용하지 말 것
-"""
-
-import json
-import re
-import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
-from urllib.parse import urlparse
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import httpx
-
-FASTAPI_BASE = "http://localhost:8000"
-PORT = 3000
-
-# ---------------------------------------------------------------------------
-# HTML 테스트 페이지 (단일 파일, MediaPipe 생략 — 토큰만 전달)
-# ---------------------------------------------------------------------------
-_HTML = """\
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -108,7 +62,7 @@ _HTML = """\
 
 <script>
 const authId = (() => {
-  const m = location.pathname.match(/\\/auth\\/([^\\/]+)/);
+  const m = location.pathname.match(/\/auth\/([^\/]+)/);
   return m ? m[1] : null;
 })();
 document.getElementById('auth-id-label').textContent = 'session: ' + authId;
@@ -120,7 +74,7 @@ async function startLiveness() {
   document.getElementById('btn-start').disabled = true;
   setStatus('Liveness 지시 요청 중...');
   try {
-    const r = await fetch('/api/auth/' + authId + '/liveness');
+    const r = await fetch('/auth/' + authId + '/liveness');
     if (!r.ok) { const d=await r.json(); throw new Error(d.detail||r.status); }
     const data = await r.json();
     _token = data.token;
@@ -141,7 +95,7 @@ async function completeLiveness() {
   document.getElementById('btn-done-liveness').disabled = true;
   setStatus('Liveness 검증 중...');
   try {
-    const r = await fetch('/api/auth/' + authId + '/liveness', {
+    const r = await fetch('/auth/' + authId + '/liveness', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({token: _token}),
@@ -190,7 +144,7 @@ async function captureAndVerify() {
     const form = new FormData();
     form.append('file', blob, 'face.jpg');
     try {
-      const r = await fetch('/api/auth/' + authId + '/face', {method:'POST', body:form});
+      const r = await fetch('/auth/' + authId + '/face', {method:'POST', body:form});
       const data = await r.json();
       showResult(data, r.ok);
     } catch(e) {
@@ -219,7 +173,7 @@ function showResult(data, ok) {
 
 async function checkStatus() {
   try {
-    const r = await fetch('/api/auth/' + authId + '/status');
+    const r = await fetch('/auth/' + authId + '/status');
     const data = await r.json();
     document.getElementById('status-json').textContent = JSON.stringify(data, null, 2);
   } catch(e) {
@@ -229,95 +183,3 @@ async function checkStatus() {
 </script>
 </body>
 </html>
-"""
-
-
-# ---------------------------------------------------------------------------
-# HTTP 프록시 핸들러
-# ---------------------------------------------------------------------------
-
-class AuthTestHandler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        print(f"  [{self.address_string()}] {fmt % args}")
-
-    # ---- GET ---------------------------------------------------------------
-    def do_GET(self):
-        path = urlparse(self.path).path
-
-        if re.match(r"^/auth/[^/]+$", path):
-            self._serve_html()
-        elif path.startswith("/api/auth/"):
-            self._proxy_get(path[4:])  # /api → strip
-        else:
-            self._send(404, b'{"error":"not found"}')
-
-    # ---- POST --------------------------------------------------------------
-    def do_POST(self):
-        path = urlparse(self.path).path
-        if path.startswith("/api/auth/"):
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
-            self._proxy_post(path[4:], body, self.headers.get("Content-Type", ""))
-        else:
-            self._send(404, b'{"error":"not found"}')
-
-    # ---- helpers -----------------------------------------------------------
-    def _serve_html(self):
-        body = _HTML.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", len(body))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _proxy_get(self, api_path: str):
-        try:
-            with httpx.Client(timeout=30.0) as c:
-                r = c.get(f"{FASTAPI_BASE}{api_path}")
-            self._send(r.status_code, r.content)
-        except Exception as e:
-            self._send(502, json.dumps({"error": str(e)}).encode())
-
-    def _proxy_post(self, api_path: str, body: bytes, content_type: str):
-        try:
-            with httpx.Client(timeout=30.0) as c:
-                r = c.post(
-                    f"{FASTAPI_BASE}{api_path}",
-                    content=body,
-                    headers={"Content-Type": content_type},
-                )
-            self._send(r.status_code, r.content)
-        except Exception as e:
-            self._send(502, json.dumps({"error": str(e)}).encode())
-
-    def _send(self, status: int, body: bytes):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", len(body))
-        self.end_headers()
-        self.wfile.write(body)
-
-
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", PORT), AuthTestHandler)
-    print(f"""
-┌─────────────────────────────────────────────────────┐
-│        시시콜콜 인증 테스트 서버 (포트 {PORT})          │
-└─────────────────────────────────────────────────────┘
-  FastAPI 프록시 대상: {FASTAPI_BASE}
-
-  [실행 순서]
-  1) uvicorn app.main:app --reload
-  2) python scripts/auth_test_server.py   ← 지금 실행 중
-  3) ngrok http {PORT}                    ← HTTPS 필수 (카메라 권한)
-  4) .env 에 AUTH_WEB_BASE_URL=https://xxxx.ngrok-free.app 설정
-  5) python scripts/test_auth_flow.py scripts/myface.jpg +821047722480
-  6) 핸드폰 SMS 링크 클릭
-
-  Ctrl+C 로 종료
-""")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n서버 종료")
