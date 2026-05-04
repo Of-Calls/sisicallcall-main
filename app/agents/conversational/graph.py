@@ -9,6 +9,7 @@ from app.agents.conversational.nodes.auth_branch_node.auth_branch_node import au
 from app.agents.conversational.nodes.vision_branch_node.vision_branch_node import vision_branch_node
 from app.agents.conversational.nodes.escalation_branch_node.escalation_branch_node import escalation_branch_node
 from app.agents.conversational.nodes.clarify_branch_node.clarify_branch_node import clarify_branch_node
+from app.agents.conversational.nodes.repeat_branch_node.repeat_branch_node import repeat_branch_node
 
 
 def _route_by_clarity(state: CallState) -> str:
@@ -30,6 +31,7 @@ def build_graph():
     g.add_node("vision", vision_branch_node)
     g.add_node("escalation", escalation_branch_node)
     g.add_node("clarify", clarify_branch_node)
+    g.add_node("repeat", repeat_branch_node)
 
     g.set_entry_point("query_refine")
 
@@ -51,6 +53,7 @@ def build_graph():
             "auth": "auth",
             "vision": "vision",
             "escalation": "escalation",
+            "repeat": "repeat",
         },
     )
 
@@ -60,5 +63,6 @@ def build_graph():
     g.add_edge("vision", END)
     g.add_edge("escalation", END)
     g.add_edge("clarify", END)
+    g.add_edge("repeat", END)
 
     return g.compile()

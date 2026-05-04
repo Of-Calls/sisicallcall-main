@@ -9,7 +9,7 @@ _call_session_svc = RedisSessionService()
 _vision_session_svc = VisionSessionService()
 _HISTORY_TURN_LIMIT = 6  # 직전 3턴 (user+assistant 합쳐 6개 항목)
 
-_VALID_INTENTS = {"faq", "task", "auth", "vision", "escalation"}
+_VALID_INTENTS = {"faq", "task", "auth", "vision", "escalation", "repeat"}
 
 
 def _format_history(history: list) -> str:

@@ -111,7 +111,7 @@ function showResult(data) {
   document.getElementById('label-display').textContent = '✅ ' + data.label;
   const conf = parseFloat(data.confidence || 0);
   document.getElementById('conf-display').textContent = '신뢰도: ' + (conf * 100).toFixed(1) + '%';
-  document.getElementById('result-msg').textContent = '결과가 통화에 자동으로 전달됐어요. 다시 통화 화면을 확인해주세요.';
+  document.getElementById('result-msg').textContent = '분석 결과가 준비됐어요. 통화 화면으로 돌아가 알려주시면 자세히 안내드릴게요.';
   setStatus('완료!');
 }
 </script>

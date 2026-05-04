@@ -55,7 +55,7 @@ def build_system_prompt(tenant_name: str, tenant_industry: str) -> str:
     examples_block = f"\n\n[이 {label} 도메인 예시]\n{examples}" if examples else ""
 
     return f"""당신은 전화 상담 의도 분류기입니다. 사용자는 "{tenant_name}" ({label}) 에 전화 중입니다.
-재작성된 사용자 쿼리를 바탕으로 5가지 중 하나로 분류하세요.
+재작성된 사용자 쿼리를 바탕으로 6가지 중 하나로 분류하세요.
 
 - faq: 단순 정보 요청, 영업시간, 위치, 가격, 메뉴/서비스/상품 안내, 일반 질문, 또는 **항목명이 명시된** 정보 문의
 - task: 업무 처리 (예약, 조회, 변경, 취소, SMS/문자 발송, 회원정보 조회/변경 등 도구 호출이 필요한 작업)
@@ -64,6 +64,9 @@ def build_system_prompt(tenant_name: str, tenant_industry: str) -> str:
 - vision: 사용자가 **눈앞에 있는 실물/물건의 정체를 명시적으로 모른다고 표현한 경우** 나, 시각적 확인이 반드시 필요한 경우만.
   → 주의: "메뉴", "어떤 진료", "어떤 서비스" 같은 무형의 정보 요청은 시각적 확인이 아니므로 절대 vision이 아닙니다. 무조건 faq.
 - escalation: 상담원 연결 요청, 화남, 불만 ("상담원 바꿔줘요")
+- repeat: 직전 AI 안내를 그대로 다시 듣고 싶다는 요청. query_refine 이 정확히
+  "사용자가 직전 안내 반복 요청" 으로 재작성한 경우만 → repeat.
+  → 주의: "방금 말한 X 알려주세요" 처럼 구체 항목 명시는 후속 정보 요청이라 repeat 아님 (faq 또는 task).
 
 [분류 우선순위 — 매우 중요]
 - 현재 사용자 발화 자체로 분류하세요. history 는 "사용자가 ~에 동의함/거절함" 같은
@@ -79,7 +82,8 @@ def build_system_prompt(tenant_name: str, tenant_industry: str) -> str:
 - 쿼리 예시: "사용자가 본인 인증을 완료했음을 알림/확인함" → auth (재진입 — active 인증 세션 상태 확인)
 - 쿼리 예시: "사용자가 사진 촬영/업로드에 동의함" → vision
 - 쿼리 예시: "사용자가 예약 진행에 동의함" → task
+- 쿼리 예시: "사용자가 직전 안내 반복 요청" → repeat
 - 거절 처리: 사용자가 인증이나 사진 업로드를 거절한 쿼리 → 일반 대화로 돌리기 위해 'faq'로 분류.
 
-출력 형식: 정확히 한 단어만. faq, task, auth, vision, escalation 중 하나.
+출력 형식: 정확히 한 단어만. faq, task, auth, vision, escalation, repeat 중 하나.
 다른 설명, 따옴표, 마침표 없이 단어 하나만 출력."""
