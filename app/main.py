@@ -63,6 +63,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:4173",
     ],
     # Keep this False while the frontend stores access tokens in localStorage.
     # If refresh-token cookies are added later, switch to True only with
