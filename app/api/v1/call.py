@@ -9,6 +9,7 @@ from fastapi.responses import Response
 
 from app.agents.conversational.graph import build_graph
 from app.repositories.call_repo import finalize_call, insert_call
+from app.repositories.transcript_repo import insert_transcript
 from app.services.session.redis_session import RedisSessionService
 from app.services.speaker_verify import enrollment as voiceprint_enrollment
 from app.services.speaker_verify import get_speaker_verify_service
@@ -40,6 +41,15 @@ def _extract_caller_number(caller: str) -> str:
         user = caller[4:].split("@", 1)[0].split(";", 1)[0]
         return user[:20]
     return caller[:20]
+
+
+def _intent_to_response_path(intent: str | None) -> str | None:
+    """graph intent → transcripts.response_path (CHECK 'cache','faq','task','auth','escalation').
+    매핑 외 (clarify/repeat/vision/echo/None) → NULL.
+    """
+    if intent in ("faq", "task", "auth", "escalation"):
+        return intent
+    return None
 
 
 @router.post("/incoming")
@@ -104,6 +114,8 @@ async def call_ws(websocket: WebSocket):
     call_started_at = 0.0         # time.perf_counter() — duration 계산용
     twilio_call_sid = ""
     caller_number = ""
+    # Stage 4c-2 — transcripts turn 카운터 (customer + agent 한 쌍이 같은 turn_index 공유)
+    turn_index = 0
 
     try:
         while True:
@@ -131,6 +143,7 @@ async def call_ws(websocket: WebSocket):
                 tenant_id = ""  # 매칭 실패/graph 비활성 시 echo 모드 신호
                 db_call_id = ""
                 call_started_at = time.perf_counter()
+                turn_index = 0
 
                 # Stage 4b — Twilio Parameter 로 받은 tenant_id 검증 + 메타 로드
                 if _GRAPH_ENABLED and received_tenant_id:
@@ -227,6 +240,7 @@ async def call_ws(websocket: WebSocket):
                             if transcript and stream_sid:
                                 # Stage 4a — graph 호출 분기 (실패 시 echo 회귀)
                                 response_text = transcript  # 기본 echo
+                                graph_intent: str | None = None
                                 if _GRAPH_ENABLED and tenant_id:
                                     try:
                                         session_view = await _session.load(stream_sid)
@@ -247,7 +261,8 @@ async def call_ws(websocket: WebSocket):
                                         result = await _graph.ainvoke(graph_state)
                                         graph_ms = (time.perf_counter() - t_graph) * 1000
                                         graph_resp = result.get("response_text", "")
-                                        print(f"[GRAPH] intent={result.get('intent')} resp='{graph_resp[:60]}' ({graph_ms:.0f}ms)")
+                                        graph_intent = result.get("intent") or None
+                                        print(f"[GRAPH] intent={graph_intent} resp='{graph_resp[:60]}' ({graph_ms:.0f}ms)")
                                         if graph_resp:
                                             response_text = graph_resp
                                             await _session.append_turn(stream_sid, transcript, graph_resp)
@@ -255,6 +270,17 @@ async def call_ws(websocket: WebSocket):
                                             print("[GRAPH] empty response — echo fallback")
                                     except Exception as e:
                                         print(f"[GRAPH] error: {e} → echo fallback")
+
+                                # Stage 4c-2 — transcripts INSERT 양방향 (TTS 송출 전)
+                                if db_call_id:
+                                    await insert_transcript(
+                                        db_call_id, turn_index, "customer", transcript,
+                                    )
+                                    await insert_transcript(
+                                        db_call_id, turn_index, "agent", response_text,
+                                        response_path=_intent_to_response_path(graph_intent),
+                                    )
+                                    turn_index += 1
 
                                 t_tts = time.perf_counter()
                                 tts_audio = await _tts.synthesize(response_text)
