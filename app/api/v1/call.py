@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from app.agents.conversational.graph import build_graph
+from app.repositories.call_repo import finalize_call, insert_call
 from app.services.session.redis_session import RedisSessionService
 from app.services.speaker_verify import enrollment as voiceprint_enrollment
 from app.services.speaker_verify import get_speaker_verify_service
@@ -33,13 +34,24 @@ _SILENCE_THRESHOLD = 30     # 연속 침묵 VAD 프레임 수 (~960ms)
 _TWILIO_CHUNK_BYTES = 160   # 20ms mulaw 8kHz — Twilio 권장 단위
 
 
+def _extract_caller_number(caller: str) -> str:
+    """SIP URI 의 user part 또는 e164 그대로. caller_number VARCHAR(20) 제약."""
+    if caller.startswith("sip:"):
+        user = caller[4:].split("@", 1)[0].split(";", 1)[0]
+        return user[:20]
+    return caller[:20]
+
+
 @router.post("/incoming")
 async def incoming_call(request: Request):
     form = await request.form()
     to_field = form.get("To", "")
+    twilio_call_sid = form.get("CallSid", "")
+    caller_raw = form.get("Caller", "") or form.get("From", "")
+    caller_number = _extract_caller_number(caller_raw)
     # SIP URI / e164 / single digit 모두 처리 — 매칭 실패 시 raw 값 반환됨 (UUID 아님 → echo).
     tenant_id = await resolve_tenant_id(to_field)
-    print(f"[INCOMING] to={to_field!r} tenant_id={tenant_id!r}")
+    print(f"[INCOMING] to={to_field!r} caller={caller_number!r} call_sid={twilio_call_sid!r} tenant_id={tenant_id!r}")
 
     host = request.headers.get("host", "")
     ws_url = f"wss://{host}/call/ws"
@@ -49,6 +61,8 @@ async def incoming_call(request: Request):
   <Connect>
     <Stream url="{ws_url}">
       <Parameter name="tenant_id" value="{tenant_id}" />
+      <Parameter name="twilio_call_sid" value="{twilio_call_sid}" />
+      <Parameter name="caller_number" value="{caller_number}" />
     </Stream>
   </Connect>
 </Response>"""
@@ -85,6 +99,11 @@ async def call_ws(websocket: WebSocket):
     tenant_id = ""
     tenant_name = "고객센터"
     tenant_industry = "unknown"
+    # Stage 4c-1 — DB hook 컨텍스트
+    db_call_id = ""               # calls.id (UUID, INSERT 후 받음). 빈값 = DB hook 비활성
+    call_started_at = 0.0         # time.perf_counter() — duration 계산용
+    twilio_call_sid = ""
+    caller_number = ""
 
     try:
         while True:
@@ -99,7 +118,9 @@ async def call_ws(websocket: WebSocket):
                 stream_sid = msg["start"]["streamSid"]
                 custom_params = msg["start"].get("customParameters") or {}
                 received_tenant_id = custom_params.get("tenant_id", "")
-                print(f"[WS] start streamSid={stream_sid} tenant_id={received_tenant_id!r}")
+                twilio_call_sid = custom_params.get("twilio_call_sid", "")
+                caller_number = custom_params.get("caller_number", "")
+                print(f"[WS] start streamSid={stream_sid} tenant_id={received_tenant_id!r} call_sid={twilio_call_sid!r}")
                 audio_buffer.clear()
                 pcm_buffer.clear()
                 utterance_pcm.clear()
@@ -108,6 +129,8 @@ async def call_ws(websocket: WebSocket):
                 had_speech = False
                 is_speaking = False
                 tenant_id = ""  # 매칭 실패/graph 비활성 시 echo 모드 신호
+                db_call_id = ""
+                call_started_at = time.perf_counter()
 
                 # Stage 4b — Twilio Parameter 로 받은 tenant_id 검증 + 메타 로드
                 if _GRAPH_ENABLED and received_tenant_id:
@@ -118,6 +141,16 @@ async def call_ws(websocket: WebSocket):
                         else:
                             tenant_id = received_tenant_id
                             print(f"[GRAPH] tenant={tenant_name} ({tenant_industry})")
+                            # Stage 4c-1 — calls INSERT (graph 활성 + tenant 매칭 시)
+                            if twilio_call_sid:
+                                inserted = await insert_call(
+                                    tenant_id=tenant_id,
+                                    twilio_call_sid=twilio_call_sid,
+                                    caller_number=caller_number or None,
+                                )
+                                if inserted:
+                                    db_call_id = inserted
+                                    print(f"[DB] calls INSERT db_call_id={db_call_id}")
                     except Exception as e:
                         print(f"[GRAPH] tenant_meta load failed: {e} → echo fallback this call")
 
@@ -259,6 +292,11 @@ async def call_ws(websocket: WebSocket):
                             await _session.clear(stream_sid)
                         except Exception as e:
                             print(f"[GRAPH] session clear failed: {e}")
+                # Stage 4c-1 — calls UPDATE finalize (Twilio 정상 종료)
+                if db_call_id:
+                    duration_sec = int(time.perf_counter() - call_started_at) if call_started_at else None
+                    await finalize_call(db_call_id, "completed", duration_sec)
+                    print(f"[DB] finalize_call db_call_id={db_call_id} status=completed dur={duration_sec}s")
                 break
 
     except WebSocketDisconnect:
@@ -271,3 +309,8 @@ async def call_ws(websocket: WebSocket):
                     await _session.clear(stream_sid)
                 except Exception as e:
                     print(f"[GRAPH] session clear failed: {e}")
+        # Stage 4c-1 — calls UPDATE finalize (사용자 먼저 끊음)
+        if db_call_id:
+            duration_sec = int(time.perf_counter() - call_started_at) if call_started_at else None
+            await finalize_call(db_call_id, "abandoned", duration_sec)
+            print(f"[DB] finalize_call db_call_id={db_call_id} status=abandoned dur={duration_sec}s")
