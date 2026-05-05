@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from app.agents.conversational.graph import build_graph
+from app.agents.post_call.runner import run_post_call_agent_safely
 from app.repositories.call_repo import finalize_call, insert_call
 from app.repositories.transcript_repo import insert_transcript
 from app.services.session.redis_session import RedisSessionService
@@ -323,6 +324,12 @@ async def call_ws(websocket: WebSocket):
                     duration_sec = int(time.perf_counter() - call_started_at) if call_started_at else None
                     await finalize_call(db_call_id, "completed", duration_sec)
                     print(f"[DB] finalize_call db_call_id={db_call_id} status=completed dur={duration_sec}s")
+                    # Stage 4c-3 — post_call agent fire-and-forget
+                    if tenant_id:
+                        asyncio.create_task(
+                            run_post_call_agent_safely(db_call_id, "call_ended", tenant_id)
+                        )
+                        print(f"[POST_CALL] triggered db_call_id={db_call_id} tenant_id={tenant_id}")
                 break
 
     except WebSocketDisconnect:
@@ -340,3 +347,9 @@ async def call_ws(websocket: WebSocket):
             duration_sec = int(time.perf_counter() - call_started_at) if call_started_at else None
             await finalize_call(db_call_id, "abandoned", duration_sec)
             print(f"[DB] finalize_call db_call_id={db_call_id} status=abandoned dur={duration_sec}s")
+            # Stage 4c-3 — post_call agent fire-and-forget (abandoned 통화도 분석 트리거)
+            if tenant_id:
+                asyncio.create_task(
+                    run_post_call_agent_safely(db_call_id, "call_ended", tenant_id)
+                )
+                print(f"[POST_CALL] triggered db_call_id={db_call_id} tenant_id={tenant_id}")
