@@ -1,9 +1,12 @@
 from app.repositories.call_repo import (
     insert_call,
     finalize_call,
+    list_calls_for_tenant,
+    get_call_by_id_for_tenant,
 )
 from app.repositories.transcript_repo import (
     insert_transcript,
+    get_transcripts_by_call_id,
 )
 from app.repositories.call_summary_repo import (
     CallSummaryRepository,
@@ -44,8 +47,11 @@ __all__ = [
     # call (calls 테이블 — 통화 메타)
     "insert_call",
     "finalize_call",
+    "list_calls_for_tenant",
+    "get_call_by_id_for_tenant",
     # transcript (transcripts 테이블 — 발화 단위)
     "insert_transcript",
+    "get_transcripts_by_call_id",
     # call_summary
     "save_summary",
     "get_summary_by_call_id",

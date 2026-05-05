@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import APP_DESCRIPTION, APP_TITLE, APP_VERSION
 from app.core.middleware import RequestLoggingMiddleware
@@ -55,6 +56,20 @@ app = FastAPI(
     version=APP_VERSION,
     description=APP_DESCRIPTION,
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    # Keep this False while the frontend stores access tokens in localStorage.
+    # If refresh-token cookies are added later, switch to True only with
+    # explicit origins, secure cookie settings, and matching SameSite policy.
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.add_middleware(RequestLoggingMiddleware)

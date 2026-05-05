@@ -3,13 +3,25 @@ import audioop
 import base64
 import json
 import time
-from typing import Optional
+import uuid
+from datetime import datetime
+from typing import Any
 
-from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import Response
 
 from app.agents.conversational.graph import build_call_graph
 from app.agents.conversational.state import CallState
+from app.api.v1.admin_auth import get_current_admin_user
 from app.api.v1._call_session import CallSession, spawn_background
 from app.api.v1._tenant_helpers import (
     get_greeting,
@@ -17,11 +29,13 @@ from app.api.v1._tenant_helpers import (
     resolve_tenant_id,
 )
 from app.core.events import CALL_ENDED, CALL_STARTED
-from app.repositories.call_repo import insert_call
-from app.repositories.transcript_repo import insert_transcript
+from app.repositories.call_repo import (
+    get_call_by_id_for_tenant,
+    insert_call,
+    list_calls_for_tenant,
+)
+from app.repositories.transcript_repo import get_transcripts_by_call_id, insert_transcript
 from app.services.session.redis_session import RedisSessionService
-from app.services.speaker_verify import enrollment as voiceprint_enrollment
-from app.services.speaker_verify.titanet import get_titanet_service
 from app.services.stt.deepgram import DeepgramSTTService
 from app.services.stt.deepgram_streaming import DeepgramStreamingSTTService
 from app.services.stt.keyterm_cache import get_tenant_keyterms
@@ -34,8 +48,45 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 
+
+def _request_id() -> str:
+    return f"req-{uuid.uuid4().hex[:8]}"
+
+
+def _current_admin_tenant_id(current_admin: dict[str, Any]) -> str:
+    user = current_admin.get("user") or {}
+    tenant_id = str(user.get("tenant_id") or "").strip()
+    if not tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin tenant",
+        )
+    return tenant_id
+
+
+def _validate_query_tenant_id(query_tenant_id: str | None, jwt_tenant_id: str) -> None:
+    if not query_tenant_id:
+        return
+    if query_tenant_id.strip().lower() != jwt_tenant_id.lower():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Query tenant mismatch",
+        )
+
 # 그래프 싱글톤 (앱 기동 시 1회 컴파일) — 텍스트 워크플로우 전용.
 # audio 처리 (VAD / 화자검증 / STT / enrollment) 는 graph 진입 전 본 파일에서 처리.
+def _get_voiceprint_enrollment():
+    from app.services.speaker_verify import enrollment as voiceprint_enrollment
+
+    return voiceprint_enrollment
+
+
+def _get_titanet_service():
+    from app.services.speaker_verify.titanet import get_titanet_service
+
+    return get_titanet_service()
+
+
 _graph = build_call_graph()
 _session_service = RedisSessionService()
 _streaming_stt = DeepgramStreamingSTTService()
@@ -169,7 +220,7 @@ async def _attempt_bargein_verify(session: CallSession) -> None:
         return
 
     try:
-        is_verified, similarity = await get_titanet_service().verify(chunk, session.call_id)
+        is_verified, similarity = await _get_titanet_service().verify(chunk, session.call_id)
     except Exception as exc:
         logger.error("call_id=%s bargein verify 실패: %s — skip", session.call_id, exc)
         return
@@ -256,7 +307,7 @@ async def _process_utterance(session: CallSession, utterance_end_signal: bool) -
     # 2) 화자 검증 (텔레메트리 — STT 결과 있으면 graph 진입 자체는 막지 않음)
     verify_t0 = time.monotonic()
     try:
-        await get_titanet_service().verify(chunk, session.call_id)
+        await _get_titanet_service().verify(chunk, session.call_id)
     except Exception as exc:
         logger.error("call_id=%s | 화자 검증 실패: %s", session.call_id, exc)
     logger.info(
@@ -266,7 +317,7 @@ async def _process_utterance(session: CallSession, utterance_end_signal: bool) -
 
     # 3) Enrollment — STT 성공 발화만 누적해 voiceprint 등록
     enroll_t0 = time.monotonic()
-    await voiceprint_enrollment.accumulate(session.call_id, chunk, transcript_norm)
+    await _get_voiceprint_enrollment().accumulate(session.call_id, chunk, transcript_norm)
     logger.info(
         "[pre-graph:enroll] elapsed=%.0fms call_id=%s",
         (time.monotonic() - enroll_t0) * 1000, session.call_id,
@@ -488,6 +539,40 @@ async def _handle_media(session: CallSession, msg: dict) -> None:
 
 # ── WebSocket 엔드포인트 (디스패처) ──────────────────────────────────────────
 
+@router.get("")
+async def list_calls(
+    status_filter: str | None = Query(default=None, alias="status"),
+    started_from: datetime | None = Query(default=None),
+    started_to: datetime | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1),
+    tenant_id: str | None = Query(default=None),
+    current_admin: dict[str, Any] = Depends(get_current_admin_user),
+):
+    jwt_tenant_id = _current_admin_tenant_id(current_admin)
+    _validate_query_tenant_id(tenant_id, jwt_tenant_id)
+    effective_limit = min(limit, 100)
+
+    result = await list_calls_for_tenant(
+        tenant_id=jwt_tenant_id,
+        status=status_filter,
+        started_from=started_from,
+        started_to=started_to,
+        offset=offset,
+        limit=effective_limit,
+    )
+
+    return {
+        "data": {
+            "items": result["items"],
+            "total": result["total"],
+            "offset": offset,
+            "limit": effective_limit,
+        },
+        "request_id": _request_id(),
+    }
+
+
 @router.post("/incoming")
 async def incoming_call(request: Request):
     """Twilio 전화 수신 webhook — TwiML 반환."""
@@ -510,6 +595,47 @@ async def incoming_call(request: Request):
 </Response>"""
 
     return Response(content=twiml, media_type="application/xml")
+
+
+@router.get("/{call_id}/transcripts")
+async def get_call_transcripts(
+    call_id: str,
+    current_admin: dict[str, Any] = Depends(get_current_admin_user),
+):
+    tenant_id = _current_admin_tenant_id(current_admin)
+    transcripts = await get_transcripts_by_call_id(call_id, tenant_id)
+    if transcripts is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"transcripts not found: {call_id!r}",
+        )
+
+    return {
+        "data": {
+            "items": transcripts,
+            "total": len(transcripts),
+        },
+        "request_id": _request_id(),
+    }
+
+
+@router.get("/{call_id}")
+async def get_call_detail(
+    call_id: str,
+    current_admin: dict[str, Any] = Depends(get_current_admin_user),
+):
+    tenant_id = _current_admin_tenant_id(current_admin)
+    record = await get_call_by_id_for_tenant(call_id, tenant_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"call not found: {call_id!r}",
+        )
+
+    return {
+        "data": record,
+        "request_id": _request_id(),
+    }
 
 
 @router.websocket("/ws/{call_id}")
