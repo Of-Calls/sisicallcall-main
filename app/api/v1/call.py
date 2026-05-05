@@ -11,6 +11,7 @@ from app.services.speaker_verify import get_speaker_verify_service
 from app.services.stt.deepgram import DeepgramSTTService
 from app.services.tts.azure import AzureTTSService
 from app.services.vad.silero_vad import SileroVADService
+from app.utils.config import settings
 
 router = APIRouter()
 _stt = DeepgramSTTService()
@@ -98,32 +99,42 @@ async def call_ws(websocket: WebSocket):
                 while len(pcm_buffer) >= _VAD_FRAME_BYTES:
                     frame = bytes(pcm_buffer[:_VAD_FRAME_BYTES])
                     del pcm_buffer[:_VAD_FRAME_BYTES]
-                    utterance_pcm.extend(frame)  # verify/enrollment 용 16kHz 평행 누적
 
                     is_speech = await _vad.detect(frame)
 
                     if is_speech:
                         if not had_speech:
                             print("[VAD] 발화 시작")
+                            utterance_pcm.clear()  # 새 발화 — 이전 잔여/silence prefix 폐기
+                        utterance_pcm.extend(frame)  # 발화 시작 후만 누적 (verify/enrollment 입력 품질)
                         silence_count = 0
                         had_speech = True
                     else:
-                        if had_speech and silence_count == 0:
-                            print("[VAD] 침묵 카운트 시작")
+                        if had_speech:
+                            utterance_pcm.extend(frame)  # 발화 중 짧은 pause 도 포함
+                            if silence_count == 0:
+                                print("[VAD] 침묵 카운트 시작")
                         silence_count += 1
                         if silence_count >= _SILENCE_THRESHOLD and had_speech:
                             pcm_for_verify = bytes(utterance_pcm)
+                            print(f"[VERIFY-DBG] utterance_pcm={len(pcm_for_verify)}B")
 
                             # Stage B: voiceprint 등록 후 — STT 전 화자검증 게이트
+                            # TitaNet 짧은 발화 한계 → 1.5초 미만은 verify 스킵 (본인 reject 방지)
+                            min_verify_bytes = int(settings.speaker_verify_min_audio_sec * 16000 * 2)
                             if stream_sid and _verifier.is_enrolled(stream_sid):
-                                verified, sim = await _verifier.verify(pcm_for_verify, stream_sid)
-                                if not verified:
-                                    print(f"[VERIFY] reject sim={sim:.3f} — STT skip")
-                                    audio_buffer.clear()
-                                    utterance_pcm.clear()
-                                    silence_count = 0
-                                    had_speech = False
-                                    continue
+                                if len(pcm_for_verify) < min_verify_bytes:
+                                    dur_ms = len(pcm_for_verify) * 1000 // 32000
+                                    print(f"[VERIFY] short ({dur_ms}ms < {settings.speaker_verify_min_audio_sec}s) — skip verify")
+                                else:
+                                    verified, sim = await _verifier.verify(pcm_for_verify, stream_sid)
+                                    if not verified:
+                                        print(f"[VERIFY] reject sim={sim:.3f} — STT skip")
+                                        audio_buffer.clear()
+                                        utterance_pcm.clear()
+                                        silence_count = 0
+                                        had_speech = False
+                                        continue
 
                             print(f"[VAD] 침묵 임계 도달 — {len(audio_buffer)}B → STT")
 

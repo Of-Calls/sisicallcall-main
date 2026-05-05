@@ -56,8 +56,17 @@ class TitaNetOnnxService(BaseSpeakerVerifyService):
             self._session = None
 
     def _run_onnx_sync(self, pcm_16k: bytes) -> np.ndarray:
-        """PCM16 → log-mel → ONNX → L2-normalized embedding (192-d)."""
+        """PCM16 → log-mel → ONNX → L2-normalized embedding (192-d).
+
+        입력 길이 cap (settings.speaker_verify_enrollment_sec, 기본 3초):
+            - TitaNet-L ONNX encoder 내부 max frame ≈1200 (≈12초). 초과 시 broadcast 충돌.
+            - 화자검증은 1.5~3초로 충분 — 더 길면 잡음/잔향 누적으로 임베딩 분산 증가.
+            - enrollment 와 verify 가 동일 길이 입력 → 임베딩 분포 안정.
+        """
         assert self._session is not None
+        max_bytes = int(settings.speaker_verify_enrollment_sec * 16000 * 2)
+        if len(pcm_16k) > max_bytes:
+            pcm_16k = pcm_16k[:max_bytes]
         log_mel = pcm16_to_logmel(pcm_16k)              # (1, 80, T) float32
         length = np.array([log_mel.shape[2]], dtype=np.int64)
         inputs = {"audio_signal": log_mel, "length": length}

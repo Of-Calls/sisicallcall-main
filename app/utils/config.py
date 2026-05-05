@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     speaker_verify_model_path: str = "models/speech_verification/titanet_large.onnx"
     speaker_verify_threshold: float = 0.5
     speaker_verify_enrollment_sec: float = 3.0
+    # TitaNet 짧은 발화 한계 — 2.0초 미만 발화는 임베딩 신뢰성 낮아 본인 reject 위험.
+    # 미만은 verify 스킵하고 통과 (짧은 응답 보호 + 시연 안정성 우선).
+    # 임베딩 신뢰성 곡선: <1s 매우 불안정, 1~1.5s 불안정, 1.5~2s 경계, 2s+ 안정.
+    speaker_verify_min_audio_sec: float = 2.0
 
     # Silero VAD (v6.2+, 2026-04-30 채택 — 짧은 발화 + 긴 trailing silence reject 해결).
     # logs/2026-04-30/server_100651.log Turn 4/5 사례: "예약은어떻게해요" 0.5s + trailing 1.3s
