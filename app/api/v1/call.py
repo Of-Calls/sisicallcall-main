@@ -2,13 +2,17 @@ import asyncio
 import audioop
 import base64
 import json
+import os
 import time
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
+from app.agents.conversational.graph import build_graph
+from app.services.session.redis_session import RedisSessionService
 from app.services.speaker_verify import enrollment as voiceprint_enrollment
 from app.services.speaker_verify import get_speaker_verify_service
 from app.services.stt.deepgram import DeepgramSTTService
+from app.services.tenant import get_tenant_meta
 from app.services.tts.azure import AzureTTSService
 from app.services.vad.silero_vad import SileroVADService
 from app.utils.config import settings
@@ -18,6 +22,12 @@ _stt = DeepgramSTTService()
 _tts = AzureTTSService()
 _vad = SileroVADService()
 _verifier = get_speaker_verify_service()
+_graph = build_graph()
+_session = RedisSessionService()
+
+# Stage 4a — graph 통합 (echo 회귀 환경변수)
+_GRAPH_ENABLED = os.getenv("GRAPH_INTEGRATION_ENABLED", "false").lower() in ("1", "true", "yes")
+_FALLBACK_TENANT_ID = "ba2bf499-6fcc-4340-b3dd-9341f8bcc915"  # 한밭식당 (4b 에서 dialed-number 매핑으로 교체)
 
 _VAD_FRAME_BYTES = 1024     # linear16 16kHz, 512 samples
 _SILENCE_THRESHOLD = 30     # 연속 침묵 VAD 프레임 수 (~960ms)
@@ -64,6 +74,10 @@ async def call_ws(websocket: WebSocket):
     had_speech = False
     stream_sid = None
     is_speaking = False  # TTS 송출 중 플래그 — Mode A (Stage 1b) 자기루프 방지
+    # Stage 4a — graph 컨텍스트 (start 시 로드)
+    tenant_id = ""
+    tenant_name = "고객센터"
+    tenant_industry = "unknown"
 
     try:
         while True:
@@ -84,6 +98,16 @@ async def call_ws(websocket: WebSocket):
                 silence_count = 0
                 had_speech = False
                 is_speaking = False
+
+                # Stage 4a — tenant 메타 로드 (graph_enabled 시만)
+                if _GRAPH_ENABLED:
+                    tenant_id = _FALLBACK_TENANT_ID
+                    try:
+                        tenant_name, tenant_industry = await get_tenant_meta(tenant_id)
+                        print(f"[GRAPH] tenant={tenant_name} ({tenant_industry})")
+                    except Exception as e:
+                        print(f"[GRAPH] tenant_meta load failed: {e} → echo fallback this call")
+                        tenant_id = ""  # 실패 시 echo 모드
 
             elif event == "media":
                 if is_speaking:
@@ -156,8 +180,39 @@ async def call_ws(websocket: WebSocket):
                             utterance_pcm.clear()
 
                             if transcript and stream_sid:
+                                # Stage 4a — graph 호출 분기 (실패 시 echo 회귀)
+                                response_text = transcript  # 기본 echo
+                                if _GRAPH_ENABLED and tenant_id:
+                                    try:
+                                        session_view = await _session.load(stream_sid)
+                                        graph_state = {
+                                            "call_id": stream_sid,
+                                            "tenant_id": tenant_id,
+                                            "tenant_name": tenant_name,
+                                            "tenant_industry": tenant_industry,
+                                            "user_text": transcript,
+                                            "intent": "",
+                                            "response_text": "",
+                                            "session_view": session_view,
+                                            "rewritten_query": "",
+                                            "is_clear": False,
+                                            "missing_info": "",
+                                        }
+                                        t_graph = time.perf_counter()
+                                        result = await _graph.ainvoke(graph_state)
+                                        graph_ms = (time.perf_counter() - t_graph) * 1000
+                                        graph_resp = result.get("response_text", "")
+                                        print(f"[GRAPH] intent={result.get('intent')} resp='{graph_resp[:60]}' ({graph_ms:.0f}ms)")
+                                        if graph_resp:
+                                            response_text = graph_resp
+                                            await _session.append_turn(stream_sid, transcript, graph_resp)
+                                        else:
+                                            print("[GRAPH] empty response — echo fallback")
+                                    except Exception as e:
+                                        print(f"[GRAPH] error: {e} → echo fallback")
+
                                 t_tts = time.perf_counter()
-                                tts_audio = await _tts.synthesize(transcript)
+                                tts_audio = await _tts.synthesize(response_text)
                                 tts_ms = (time.perf_counter() - t_tts) * 1000
                                 print(f"[TTS] synth {tts_ms:.0f}ms, out={len(tts_audio)}B")
 
@@ -187,6 +242,11 @@ async def call_ws(websocket: WebSocket):
                 if stream_sid:
                     _verifier.cleanup(stream_sid)
                     voiceprint_enrollment.cleanup(stream_sid)
+                    if _GRAPH_ENABLED:
+                        try:
+                            await _session.clear(stream_sid)
+                        except Exception as e:
+                            print(f"[GRAPH] session clear failed: {e}")
                 break
 
     except WebSocketDisconnect:
@@ -194,3 +254,8 @@ async def call_ws(websocket: WebSocket):
         if stream_sid:
             _verifier.cleanup(stream_sid)
             voiceprint_enrollment.cleanup(stream_sid)
+            if _GRAPH_ENABLED:
+                try:
+                    await _session.clear(stream_sid)
+                except Exception as e:
+                    print(f"[GRAPH] session clear failed: {e}")
