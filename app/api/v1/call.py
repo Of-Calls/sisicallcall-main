@@ -6,6 +6,8 @@ import time
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
+from app.services.speaker_verify import enrollment as voiceprint_enrollment
+from app.services.speaker_verify import get_speaker_verify_service
 from app.services.stt.deepgram import DeepgramSTTService
 from app.services.tts.azure import AzureTTSService
 from app.services.vad.silero_vad import SileroVADService
@@ -14,6 +16,7 @@ router = APIRouter()
 _stt = DeepgramSTTService()
 _tts = AzureTTSService()
 _vad = SileroVADService()
+_verifier = get_speaker_verify_service()
 
 _VAD_FRAME_BYTES = 1024     # linear16 16kHz, 512 samples
 _SILENCE_THRESHOLD = 30     # 연속 침묵 VAD 프레임 수 (~960ms)
@@ -52,9 +55,10 @@ async def call_ws(websocket: WebSocket):
     await websocket.accept()
     print("[WS] Twilio 연결됨")
 
-    audio_buffer = bytearray()  # STT용 (mulaw 8kHz 누적)
-    pcm_buffer = bytearray()    # VAD용 (linear16 16kHz 누적)
-    ratecv_state = None         # audioop.ratecv state — 8k→16k 보간 연속성 유지
+    audio_buffer = bytearray()    # STT용 (mulaw 8kHz 누적)
+    pcm_buffer = bytearray()      # VAD frame 잘라쓰는 용 (linear16 16kHz 임시)
+    utterance_pcm = bytearray()   # 화자검증/enrollment 용 (linear16 16kHz, 발화 단위 누적)
+    ratecv_state = None           # audioop.ratecv state — 8k→16k 보간 연속성 유지
     silence_count = 0
     had_speech = False
     stream_sid = None
@@ -74,6 +78,7 @@ async def call_ws(websocket: WebSocket):
                 print(f"[WS] start streamSid={stream_sid}")
                 audio_buffer.clear()
                 pcm_buffer.clear()
+                utterance_pcm.clear()
                 ratecv_state = None
                 silence_count = 0
                 had_speech = False
@@ -93,6 +98,7 @@ async def call_ws(websocket: WebSocket):
                 while len(pcm_buffer) >= _VAD_FRAME_BYTES:
                     frame = bytes(pcm_buffer[:_VAD_FRAME_BYTES])
                     del pcm_buffer[:_VAD_FRAME_BYTES]
+                    utterance_pcm.extend(frame)  # verify/enrollment 용 16kHz 평행 누적
 
                     is_speech = await _vad.detect(frame)
 
@@ -106,6 +112,19 @@ async def call_ws(websocket: WebSocket):
                             print("[VAD] 침묵 카운트 시작")
                         silence_count += 1
                         if silence_count >= _SILENCE_THRESHOLD and had_speech:
+                            pcm_for_verify = bytes(utterance_pcm)
+
+                            # Stage B: voiceprint 등록 후 — STT 전 화자검증 게이트
+                            if stream_sid and _verifier.is_enrolled(stream_sid):
+                                verified, sim = await _verifier.verify(pcm_for_verify, stream_sid)
+                                if not verified:
+                                    print(f"[VERIFY] reject sim={sim:.3f} — STT skip")
+                                    audio_buffer.clear()
+                                    utterance_pcm.clear()
+                                    silence_count = 0
+                                    had_speech = False
+                                    continue
+
                             print(f"[VAD] 침묵 임계 도달 — {len(audio_buffer)}B → STT")
 
                             t_stt = time.perf_counter()
@@ -116,6 +135,14 @@ async def call_ws(websocket: WebSocket):
                             audio_buffer.clear()
                             silence_count = 0
                             had_speech = False
+
+                            # Stage A: voiceprint 미등록 — STT 후 enrollment 누적 (빈 STT 차단)
+                            if stream_sid and not _verifier.is_enrolled(stream_sid):
+                                await voiceprint_enrollment.accumulate(
+                                    stream_sid, pcm_for_verify, transcript
+                                )
+
+                            utterance_pcm.clear()
 
                             if transcript and stream_sid:
                                 t_tts = time.perf_counter()
@@ -139,13 +166,20 @@ async def call_ws(websocket: WebSocket):
                                 # TTS 후 buffer / VAD state 일괄 리셋 — 잔향/echo 누적 방지
                                 audio_buffer.clear()
                                 pcm_buffer.clear()
+                                utterance_pcm.clear()
                                 ratecv_state = None
                                 silence_count = 0
                                 had_speech = False
 
             elif event == "stop":
                 print("[WS] stop")
+                if stream_sid:
+                    _verifier.cleanup(stream_sid)
+                    voiceprint_enrollment.cleanup(stream_sid)
                 break
 
     except WebSocketDisconnect:
         print("[WS] 연결 끊김")
+        if stream_sid:
+            _verifier.cleanup(stream_sid)
+            voiceprint_enrollment.cleanup(stream_sid)

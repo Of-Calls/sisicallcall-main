@@ -20,6 +20,12 @@ async def lifespan(app: FastAPI):
     _logger.info("startup: loading BGE-M3 embedding model...")
     get_embedder()
     _logger.info("startup: embedding model ready")
+
+    _logger.info("startup: warming up speaker verify (ONNX)...")
+    from app.services.speaker_verify import get_speaker_verify_service
+    await get_speaker_verify_service().warmup()
+    _logger.info("startup: speaker verify ready")
+
     yield
 
 

@@ -38,17 +38,14 @@ class Settings(BaseSettings):
     # TTS Output Channel 모드 — "mock" (기본, 테스트/유닛) | "twilio" (프로덕션 WebSocket)
     tts_channel_mode: str = "mock"
 
-    # TitaNet 화자 검증 (대영 R-01 연구 결과 — titanet_large 채택)
-    # threshold 변경 이력:
-    #   0.40 → 0.30 (barge-in false negative 줄이려)
-    #   0.30 → 0.45 (한뼘통화 echo/잔향이 0.30~0.40 회색지대 통과해 거짓 cancel — 2026-04-28)
-    #   0.45 → 0.30 (2026-04-29): 짧은 발화 (1초 미만) sim 0.31 → verified=False → graph
-    #     EOF 사례 다수 (server_220342.log Turn 4). 본인 음성도 짧으면 임베딩 거리가 멀어지는
-    #     TitaNet 한계. echo 위험 재증가하지만 STT fallback (graph.py route_after_speaker_verify)
-    #     이중 안전망과 함께 적용. 실통화 측정 후 0.35 등으로 재조정 가능.
-    titanet_model_name: str = "titanet_large"
-    titanet_similarity_threshold: float = 0.30
-    titanet_enrollment_sec: float = 3.0   # voiceprint 등록에 사용할 첫 발화 누적 시간
+    # Speaker Verification (TitaNet-L ONNX, runtime enrollment)
+    # ONNX 도착 전엔 enabled=False 권장 (회귀 안전망 — verify 자동 bypass).
+    # 모델 도착 시 .env 에서 SPEAKER_VERIFY_ENABLED=true.
+    # threshold/enrollment_sec 는 ONNX 도착 후 실통화로 튜닝 (보통 cosine 0.4~0.6).
+    speaker_verify_enabled: bool = False
+    speaker_verify_model_path: str = "models/speech_verification/titanet_large.onnx"
+    speaker_verify_threshold: float = 0.5
+    speaker_verify_enrollment_sec: float = 3.0
 
     # Silero VAD (v6.2+, 2026-04-30 채택 — 짧은 발화 + 긴 trailing silence reject 해결).
     # logs/2026-04-30/server_100651.log Turn 4/5 사례: "예약은어떻게해요" 0.5s + trailing 1.3s

@@ -29,9 +29,7 @@ webrtcvad-wheels==2.0.14
 # TTS — Azure Speech SDK (μ-law 8kHz 네이티브 출력, Twilio 호환)
 azure-cognitiveservices-speech==1.40.0
 
-# Speaker Verification
-# TitaNet (대영 R-01 채택) — NeMo ASR 포함
-nemo-toolkit[asr]==2.7.2
+# Speaker Verification — TitaNet-L ONNX (onnxruntime 은 ArcFace 와 공유, 아래 ArcFace 섹션 참조)
 
 # Embedding / Vector DB
 chromadb==0.5.23
@@ -48,7 +46,7 @@ pydantic-settings==2.5.2
 python-dotenv==1.0.1
 
 # Audio
-numpy==2.4.4  # NeMo 2.7.2 설치로 1.26.4 → 2.4.4 업그레이드됨
+numpy==2.4.4
 
 # PyTorch + CUDA — cu124 인덱스에서 설치 필요
 # pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
