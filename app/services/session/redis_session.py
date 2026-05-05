@@ -118,3 +118,28 @@ class RedisSessionService:
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
         )
+
+    # ── tenant 단위 캐시 (PDF 인덱싱 산출물) ─────────────────────────
+
+    def _key_rag_categories(self, tenant_id: str) -> str:
+        return f"tenant_rag_categories:{tenant_id}"
+
+    async def set_rag_categories(self, tenant_id: str, categories: list[str]) -> None:
+        """tenant 의 안내 가능 카테고리 5~7개 저장 — PDF 인덱싱 후 1회 호출.
+
+        TTL 없음 — 다음 재인덱싱이 덮어쓰며 갱신. admin UI Layer 1 노출용.
+        """
+        await self._client.set(
+            self._key_rag_categories(tenant_id),
+            json.dumps(categories, ensure_ascii=False),
+        )
+
+    async def get_rag_categories(self, tenant_id: str) -> list[str]:
+        """tenant 의 안내 가능 카테고리 조회. 미설정 시 빈 list."""
+        data = await self._client.get(self._key_rag_categories(tenant_id))
+        if not data:
+            return []
+        try:
+            return json.loads(data)
+        except Exception:
+            return []

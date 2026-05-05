@@ -71,7 +71,7 @@ async def _humanize_with_rag(label: str, tenant_id: str) -> str:
     """
     query = f"{label} 정수기 사양"
     embedder = get_embedder()
-    embedding = await embedder.embed(query)
+    embedding = await embedder.embed_query(query)
 
     where = {
         "$and": [

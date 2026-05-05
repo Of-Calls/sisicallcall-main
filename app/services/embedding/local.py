@@ -50,3 +50,6 @@ class BGEM3LocalEmbeddingService(BaseEmbeddingService):
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._encode_sync, texts)
+
+    # embed_query / embed_passages 는 base 의 default (embed/embed_batch 호출) 사용.
+    # BGE-M3 는 README 가 query instruction 권장하지만 실험 결과 우리 도메인 효과 X (Phase 1+ 측정).

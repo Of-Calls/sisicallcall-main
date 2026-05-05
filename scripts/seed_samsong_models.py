@@ -102,7 +102,7 @@ async def main() -> None:
     metas = await _enrich_chunks_with_llm(chunks, llm)
     logger.info("enrich 완료 cnt=%d", len(metas))
 
-    embeddings = await embedder.embed_batch(polished)
+    embeddings = await embedder.embed_passages(polished)
     logger.info("임베딩 완료 cnt=%d", len(embeddings))
 
     document_id = str(uuid.uuid4())

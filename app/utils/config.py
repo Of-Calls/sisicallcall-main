@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     chroma_host: str = "localhost"
     chroma_port: int = 8001
 
+    # Embedding provider — "bge-m3" (default, FlagEmbedding) | "qwen3" (sentence-transformers).
+    # swap 시 ChromaDB 의 모든 컬렉션 reseed 필수 (벡터 공간이 모델별로 다름).
+    embedding_provider: str = "bge-m3"
+
+    # FAQ RAG distance threshold (ChromaDB default L2). 임베딩 모델에 따라 분포 다름.
+    # - BGE-M3: 0.85 (정답 0.6~0.85, 무관 1.0+)
+    # - Qwen3:  1.15 (정답 0.5~1.20, 무관 1.21+, gap 우월)
+    faq_distance_threshold: float = 0.85
+    # vision 게이트는 일반 humanize 보다 느슨 (model_spec 청크 top_k 진입 자체가 신호).
+    faq_vision_gate_threshold: float = 0.95
+
     # App
     env: str = "development"
     log_level: str = "INFO"

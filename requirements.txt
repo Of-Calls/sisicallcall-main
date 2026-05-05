@@ -79,10 +79,8 @@ httpx==0.27.2
 python-multipart==0.0.12
 
 # PDF Processing
-# opendataloader-pdf: Java 기반 파서 — chunk 응집·헤더 hierarchy 인식 압도적 (JVM 11+ 필요)
-# pymupdf4llm: opendataloader 실패 시 fallback (JVM 미설치 환경 호환)
+# opendataloader-pdf: Java 기반 파서 — JSON tree (heading level / table row-cell / list item) 출력 (JVM 11+ 필요)
 opendataloader-pdf==2.3.0
-pymupdf4llm
 
 # post-call Agent
 typing_extensions

@@ -1,16 +1,23 @@
 from app.services.embedding.base import BaseEmbeddingService
-from app.services.embedding.local import BGEM3LocalEmbeddingService
+from app.utils.config import settings
 
 _embedder: BaseEmbeddingService | None = None
 
 
 def get_embedder() -> BaseEmbeddingService:
-    """BGE-M3 임베더 lazy singleton.
+    """임베더 lazy singleton — settings.embedding_provider 따라 분기.
 
-    - 프로덕션: app/main.py lifespan 에서 부팅 시 1회 호출 → 첫 요청 latency 0
-    - 테스트 (scripts/graph_test.py): 첫 호출 시 로딩 (테스트라 OK)
+    - "bge-m3" (default): FlagEmbedding BGE-M3 (1024d, multilingual SOTA 2024)
+    - "qwen3": sentence-transformers Qwen3-Embedding-0.6B (1024d, multilingual SOTA 2025)
+
+    프로덕션은 app/main.py lifespan 에서 부팅 시 1회 호출 → 첫 요청 latency 0.
     """
     global _embedder
     if _embedder is None:
-        _embedder = BGEM3LocalEmbeddingService()
+        if settings.embedding_provider == "qwen3":
+            from app.services.embedding.qwen3 import Qwen3EmbeddingService
+            _embedder = Qwen3EmbeddingService()
+        else:
+            from app.services.embedding.local import BGEM3LocalEmbeddingService
+            _embedder = BGEM3LocalEmbeddingService()
     return _embedder

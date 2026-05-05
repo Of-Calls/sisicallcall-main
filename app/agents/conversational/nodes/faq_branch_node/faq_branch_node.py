@@ -3,19 +3,21 @@ from app.services.cache import get_cache
 from app.services.embedding import get_embedder
 from app.services.llm.gpt4o_mini import GPT4OMiniService
 from app.services.rag.chroma import ChromaRAGService
+from app.utils.config import settings
 
 _llm = GPT4OMiniService()
 _rag = ChromaRAGService()
 _cache = get_cache()
 
 _TOP_K = 3
-# ChromaDB default L2 distance (BGE-M3 normalized) — 작을수록 유사.
-# 분포: 매우 관련 0.6~0.8, 약 관련 0.8~1.0, 무관 1.0+ (max √2 ≈ 1.41).
-# 0.85 — 한밭식당 검증 결과 정확히 매칭되는 청크는 0.6~0.85 범위에 분포.
-_DIST_THRESHOLD = 0.85
-# vision 게이트는 모델 식별 필요 신호만 잡으면 됨 — 일반 humanize 보다 느슨한 기준.
-# 0.95 — model_spec 청크가 top_k 안에 들어왔다는 사실 자체가 강한 신호.
-_VISION_GATE_THRESHOLD = 0.95
+# ChromaDB default L2 distance (정규화 벡터) — 작을수록 유사.
+# 모델별 분포:
+#   - BGE-M3:  정답 0.6~0.85, 무관 1.0+
+#   - Qwen3:   정답 0.5~1.20, 무관 1.21+
+# settings.faq_distance_threshold 로 조정 가능 (.env: FAQ_DISTANCE_THRESHOLD).
+_DIST_THRESHOLD = settings.faq_distance_threshold
+# vision 게이트 — model_spec 청크 top_k 진입 자체가 강한 신호.
+_VISION_GATE_THRESHOLD = settings.faq_vision_gate_threshold
 
 _POLITE_AUTH = "본인 인증이 필요한 정보예요. 인증 진행해드릴까요?"
 _POLITE_VISION = "확인하시려는 게 어떤 건지 사진으로 봐야 정확히 안내드릴 수 있어요. 사진 보내주실 수 있을까요?"
@@ -46,9 +48,9 @@ async def faq_branch_node(state: CallState) -> dict:
         print("[faq_branch] 거절 패턴 감지 → polite decline")
         return {"response_text": _POLITE_DECLINE_FALLBACK}
 
-    # 1. 임베딩 (캐시 + RAG 공유)
+    # 1. 임베딩 (캐시 + RAG 공유) — query 측 asymmetric instruction 적용 (Qwen3) / BGE-M3 는 fallthrough.
     embedder = get_embedder()
-    embedding = await embedder.embed(query)
+    embedding = await embedder.embed_query(query)
 
     # 2. 캐시 조회 — hit 시 LLM/RAG 둘 다 skip
     cache_hit = await _cache.lookup(tenant_id, embedding)
