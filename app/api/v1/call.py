@@ -12,7 +12,7 @@ from app.services.session.redis_session import RedisSessionService
 from app.services.speaker_verify import enrollment as voiceprint_enrollment
 from app.services.speaker_verify import get_speaker_verify_service
 from app.services.stt.deepgram import DeepgramSTTService
-from app.services.tenant import get_tenant_meta
+from app.services.tenant import DEFAULT_INDUSTRY, DEFAULT_NAME, get_tenant_meta, resolve_tenant_id
 from app.services.tts.azure import AzureTTSService
 from app.services.vad.silero_vad import SileroVADService
 from app.utils.config import settings
@@ -27,7 +27,6 @@ _session = RedisSessionService()
 
 # Stage 4a — graph 통합 (echo 회귀 환경변수)
 _GRAPH_ENABLED = os.getenv("GRAPH_INTEGRATION_ENABLED", "false").lower() in ("1", "true", "yes")
-_FALLBACK_TENANT_ID = "ba2bf499-6fcc-4340-b3dd-9341f8bcc915"  # 한밭식당 (4b 에서 dialed-number 매핑으로 교체)
 
 _VAD_FRAME_BYTES = 1024     # linear16 16kHz, 512 samples
 _SILENCE_THRESHOLD = 30     # 연속 침묵 VAD 프레임 수 (~960ms)
@@ -36,13 +35,21 @@ _TWILIO_CHUNK_BYTES = 160   # 20ms mulaw 8kHz — Twilio 권장 단위
 
 @router.post("/incoming")
 async def incoming_call(request: Request):
+    form = await request.form()
+    to_field = form.get("To", "")
+    # SIP URI / e164 / single digit 모두 처리 — 매칭 실패 시 raw 값 반환됨 (UUID 아님 → echo).
+    tenant_id = await resolve_tenant_id(to_field)
+    print(f"[INCOMING] to={to_field!r} tenant_id={tenant_id!r}")
+
     host = request.headers.get("host", "")
     ws_url = f"wss://{host}/call/ws"
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="{ws_url}" />
+    <Stream url="{ws_url}">
+      <Parameter name="tenant_id" value="{tenant_id}" />
+    </Stream>
   </Connect>
 </Response>"""
 
@@ -90,7 +97,9 @@ async def call_ws(websocket: WebSocket):
 
             elif event == "start":
                 stream_sid = msg["start"]["streamSid"]
-                print(f"[WS] start streamSid={stream_sid}")
+                custom_params = msg["start"].get("customParameters") or {}
+                received_tenant_id = custom_params.get("tenant_id", "")
+                print(f"[WS] start streamSid={stream_sid} tenant_id={received_tenant_id!r}")
                 audio_buffer.clear()
                 pcm_buffer.clear()
                 utterance_pcm.clear()
@@ -98,16 +107,19 @@ async def call_ws(websocket: WebSocket):
                 silence_count = 0
                 had_speech = False
                 is_speaking = False
+                tenant_id = ""  # 매칭 실패/graph 비활성 시 echo 모드 신호
 
-                # Stage 4a — tenant 메타 로드 (graph_enabled 시만)
-                if _GRAPH_ENABLED:
-                    tenant_id = _FALLBACK_TENANT_ID
+                # Stage 4b — Twilio Parameter 로 받은 tenant_id 검증 + 메타 로드
+                if _GRAPH_ENABLED and received_tenant_id:
                     try:
-                        tenant_name, tenant_industry = await get_tenant_meta(tenant_id)
-                        print(f"[GRAPH] tenant={tenant_name} ({tenant_industry})")
+                        tenant_name, tenant_industry = await get_tenant_meta(received_tenant_id)
+                        if tenant_name == DEFAULT_NAME and tenant_industry == DEFAULT_INDUSTRY:
+                            print(f"[GRAPH] tenant 매칭 실패 (received={received_tenant_id!r}) → echo")
+                        else:
+                            tenant_id = received_tenant_id
+                            print(f"[GRAPH] tenant={tenant_name} ({tenant_industry})")
                     except Exception as e:
                         print(f"[GRAPH] tenant_meta load failed: {e} → echo fallback this call")
-                        tenant_id = ""  # 실패 시 echo 모드
 
             elif event == "media":
                 if is_speaking:
