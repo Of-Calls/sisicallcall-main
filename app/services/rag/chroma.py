@@ -33,20 +33,31 @@ class ChromaRAGService(BaseRAGService):
         return await loop.run_in_executor(None, _query)
 
     async def search_with_meta(
-        self, query_embedding: list[float], tenant_id: str, top_k: int = 3
+        self,
+        query_embedding: list[float],
+        tenant_id: str,
+        top_k: int = 3,
+        where: dict | None = None,
     ) -> list[dict]:
-        """벡터 검색 + id/distance/metadata 동봉 반환 — 진단/로깅용."""
+        """벡터 검색 + id/distance/metadata 동봉 반환 — 진단/로깅용.
+
+        where: ChromaDB metadata 필터. 예) {"doc_type": "model_spec", "model_id": "B1"}.
+        None 이면 필터 없이 컬렉션 전체에서 top_k 검색.
+        """
         import asyncio
 
         loop = asyncio.get_event_loop()
 
         def _query():
             col = self._client.get_or_create_collection(self._collection_name(tenant_id))
-            result = col.query(
-                query_embeddings=[query_embedding],
-                n_results=top_k,
-                include=["documents", "metadatas", "distances"],
-            )
+            kwargs = {
+                "query_embeddings": [query_embedding],
+                "n_results": top_k,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where:
+                kwargs["where"] = where
+            result = col.query(**kwargs)
             docs_outer = result.get("documents") or []
             if not docs_outer:
                 return []

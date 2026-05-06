@@ -201,6 +201,46 @@ async def test_save_action_logs_creates_file_store():
 
 
 @pytest.mark.asyncio
+async def test_action_log_repository_class_preserves_tenant_id():
+    repo = action_mod.MCPActionLogRepository()
+    actions = [{
+        "action_type": "create_jira_issue",
+        "tool": "jira",
+        "status": "success",
+        "external_id": "KDT-class",
+        "error": None,
+        "result": {},
+        "params": {},
+    }]
+
+    await repo.save_action_log("call-class-tenant", actions, tenant_id="tenant-class")
+
+    logs = await get_action_logs_by_call_id("call-class-tenant")
+    assert len(logs) == 1
+    assert logs[0]["tenant_id"] == "tenant-class"
+
+
+@pytest.mark.asyncio
+async def test_action_log_repository_class_keeps_legacy_no_tenant_call_working():
+    repo = action_mod.MCPActionLogRepository()
+    actions = [{
+        "action_type": "create_jira_issue",
+        "tool": "jira",
+        "status": "success",
+        "external_id": "KDT-legacy",
+        "error": None,
+        "result": {},
+        "params": {},
+    }]
+
+    await repo.save_action_log("call-class-legacy", actions)
+
+    logs = await get_action_logs_by_call_id("call-class-legacy")
+    assert len(logs) == 1
+    assert logs[0]["tenant_id"] == ""
+
+
+@pytest.mark.asyncio
 async def test_find_successful_action_loads_success_from_file():
     await save_action_logs(
         "call-file-002",

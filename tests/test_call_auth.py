@@ -68,7 +68,7 @@ class SileroVADService:
 silero_stub.SileroVADService = SileroVADService
 sys.modules.setdefault("app.services.vad.silero_vad", silero_stub)
 
-from app.api.v1 import admin_auth, call
+from app.api.v1 import admin_auth, call_history
 from app.core.security import create_access_token
 from app.repositories import call_repo
 
@@ -82,7 +82,7 @@ EMAIL = "admin@example.test"
 
 def _client() -> TestClient:
     app = FastAPI()
-    app.include_router(call.router, prefix="/call")
+    app.include_router(call_history.router, prefix="/call")
     return TestClient(app)
 
 
@@ -160,7 +160,7 @@ def test_list_calls_with_valid_token_returns_200_and_uses_jwt_tenant(monkeypatch
         captured.append(kwargs)
         return {"items": [_call_payload()], "total": 1}
 
-    monkeypatch.setattr(call, "list_calls_for_tenant", fake_list_calls_for_tenant)
+    monkeypatch.setattr(call_history, "list_calls_for_tenant", fake_list_calls_for_tenant)
 
     resp = _client().get(
         "/call?status=completed&offset=5&limit=200",
@@ -200,7 +200,7 @@ def test_get_call_detail_with_valid_token_returns_200(monkeypatch):
         captured.append((call_id, tenant_id))
         return _call_payload(call_id=call_id, tenant_id=tenant_id)
 
-    monkeypatch.setattr(call, "get_call_by_id_for_tenant", fake_get_call_by_id_for_tenant)
+    monkeypatch.setattr(call_history, "get_call_by_id_for_tenant", fake_get_call_by_id_for_tenant)
 
     resp = _client().get(f"/call/{CALL_ID}", headers=_auth_headers())
 
@@ -217,7 +217,7 @@ def test_get_call_detail_other_tenant_returns_404(monkeypatch):
         assert tenant_id == TENANT_ID
         return None
 
-    monkeypatch.setattr(call, "get_call_by_id_for_tenant", fake_get_call_by_id_for_tenant)
+    monkeypatch.setattr(call_history, "get_call_by_id_for_tenant", fake_get_call_by_id_for_tenant)
 
     resp = _client().get(f"/call/{CALL_ID}", headers=_auth_headers())
 

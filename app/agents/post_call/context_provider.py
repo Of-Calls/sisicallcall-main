@@ -33,6 +33,7 @@ import copy
 from app.repositories import get_seeded_call_context, seed_call_context
 from app.services.db.transcripts import get_completed_call_context_from_db
 from app.utils.logger import get_logger
+from app.utils.phone import normalize_korean_phone
 
 logger = get_logger(__name__)
 
@@ -48,6 +49,21 @@ def _normalize(ctx: dict, call_id: str, tenant_id: str | None) -> dict:
         metadata["call_id"] = call_id
     if not metadata.get("tenant_id") and tenant_id:
         metadata["tenant_id"] = tenant_id
+
+    # customer_phone 보존 + 정규화. seed 경로 / DB 경로 모두 일관된 로컬 형식으로
+    # 통일한다. 빈 값이면 키 자체를 제거해 action_planner 가 .get(..., "")로
+    # 안전하게 빈 문자열을 받게 한다.
+    phone_raw = metadata.get("customer_phone")
+    if phone_raw:
+        normalized = normalize_korean_phone(phone_raw)
+        if normalized:
+            metadata["customer_phone"] = normalized
+        else:
+            metadata.pop("customer_phone", None)
+    elif "customer_phone" in metadata:
+        # None / "" 처럼 falsy 값은 키를 비워 둔다.
+        metadata.pop("customer_phone", None)
+
     result["metadata"] = metadata
 
     if result.get("transcripts") is None:

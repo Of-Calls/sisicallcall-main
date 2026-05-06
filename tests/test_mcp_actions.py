@@ -24,6 +24,8 @@ def _clear_real_mode_envs(monkeypatch):
     monkeypatch.delenv("MCP_USE_TENANT_OAUTH", raising=False)
     monkeypatch.delenv("MCP_ALLOW_ENV_FALLBACK", raising=False)
     monkeypatch.delenv("POST_CALL_ENABLE_NOTION_RECORD", raising=False)
+    # SMS_TEST_TO fallback 이 운영 .env 에서 새지 않도록 격리.
+    monkeypatch.delenv("SMS_TEST_TO", raising=False)
 
 
 @pytest.fixture(autouse=True)

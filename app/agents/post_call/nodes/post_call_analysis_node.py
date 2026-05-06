@@ -56,10 +56,11 @@ def _validate_summary(raw: dict) -> dict:
     if status not in ResolutionStatus._value2member_map_:
         logger.warning("analysis: unknown resolution_status=%r — resolved 로 대체", status)
         raw["resolution_status"] = "resolved"
-    raw.setdefault("summary_short", "")
-    raw.setdefault("summary_detailed", "")
-    raw.setdefault("customer_intent", "")
-    raw.setdefault("keywords", [])
+    raw["summary_short"] = raw.get("summary_short") or ""
+    raw["summary_detailed"] = raw.get("summary_detailed") or ""
+    raw["customer_intent"] = raw.get("customer_intent") or ""
+    if not isinstance(raw.get("keywords"), list):
+        raw["keywords"] = []
     raw.setdefault("handoff_notes", None)
     return raw
 
@@ -107,9 +108,41 @@ def _validate_priority(raw: dict) -> dict:
 
 def _validate_analysis(raw: dict) -> dict:
     """통합 분석 결과 검증. 누락 필드는 기본값으로 보정한다."""
-    summary = _validate_summary(dict(raw.get("summary") or {}))
-    voc_analysis = _validate_voc(dict(raw.get("voc_analysis") or {}))
-    priority_result = _validate_priority(dict(raw.get("priority_result") or {}))
+    if raw.get("summary"):
+        summary_raw = dict(raw.get("summary") or {})
+    else:
+        summary_raw = {
+            "summary_short": raw.get("summary_short"),
+            "summary_detailed": raw.get("summary_detailed"),
+            "customer_intent": raw.get("customer_intent"),
+            "customer_emotion": raw.get("customer_emotion"),
+            "resolution_status": raw.get("resolution_status"),
+            "keywords": raw.get("keywords"),
+            "handoff_notes": raw.get("handoff_notes"),
+        }
+
+    if raw.get("voc_analysis"):
+        voc_raw = dict(raw.get("voc_analysis") or {})
+    else:
+        voc_raw = {
+            "sentiment_result": raw.get("sentiment_result"),
+            "intent_result": raw.get("intent_result"),
+            "priority_result": raw.get("priority_result"),
+        }
+
+    priority_raw = dict(raw.get("priority_result") or voc_raw.get("priority_result") or {})
+    if raw.get("action_required") is not None:
+        priority_raw.setdefault("action_required", raw.get("action_required"))
+    if raw.get("suggested_action") is not None:
+        priority_raw.setdefault("suggested_action", raw.get("suggested_action"))
+    if raw.get("suggested_actions") and not priority_raw.get("suggested_action"):
+        suggested_actions = raw.get("suggested_actions")
+        if isinstance(suggested_actions, list) and suggested_actions:
+            priority_raw["suggested_action"] = str(suggested_actions[0])
+
+    summary = _validate_summary(summary_raw)
+    voc_analysis = _validate_voc(voc_raw)
+    priority_result = _validate_priority(priority_raw)
 
     # voc_analysis.priority_result 와 top-level priority_result 일관성 유지
     voc_pr = voc_analysis["priority_result"]
@@ -156,6 +189,9 @@ async def post_call_analysis_node(state: PostCallAgentState) -> dict:
             user_message=user_msg,
             max_tokens=1800,
         )
+        # _validate_analysis() strips out keys outside the analysis schema, so
+        # capture LLM metadata before validation.
+        llm_usage = raw.get("_llm_usage") if isinstance(raw, dict) else None
         analysis = _validate_analysis(raw)
         logger.info(
             "post_call_analysis 완료 call_id=%s emotion=%s priority=%s action_required=%s",
@@ -169,6 +205,7 @@ async def post_call_analysis_node(state: PostCallAgentState) -> dict:
             "summary": analysis["summary"],
             "voc_analysis": analysis["voc_analysis"],
             "priority_result": analysis["priority_result"],
+            "analysis_llm_usage": llm_usage,
         }
 
     except Exception as exc:
@@ -179,6 +216,7 @@ async def post_call_analysis_node(state: PostCallAgentState) -> dict:
             "summary": None,
             "voc_analysis": None,
             "priority_result": None,
+            "analysis_llm_usage": None,
             "errors": errors,
             "partial_success": True,
         }

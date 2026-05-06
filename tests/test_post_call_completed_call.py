@@ -285,6 +285,77 @@ async def test_context_provider_normalizes_branch_stats_none(monkeypatch):
     assert ctx["branch_stats"] == {}
 
 
+# ── 7-b. customer_phone 정규화 / 보존 / NULL 매핑 ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_context_provider_normalizes_customer_phone(monkeypatch):
+    """metadata.customer_phone 가 다양한 한국 형식이어도 로컬 형식으로 통일된다."""
+    from app.agents.post_call.context_provider import get_call_context_for_post_call
+
+    async def fake_db(call_id, tenant_id=None):
+        return {
+            "metadata":    {"call_id": call_id, "tenant_id": "t", "customer_phone": "+82-10-1234-5678"},
+            "transcripts": [],
+            "branch_stats": {},
+        }
+
+    monkeypatch.setattr(
+        "app.agents.post_call.context_provider.get_completed_call_context_from_db",
+        fake_db,
+    )
+
+    ctx = await get_call_context_for_post_call("phone-norm-001")
+    assert ctx is not None
+    assert ctx["metadata"]["customer_phone"] == "01012345678"
+
+
+@pytest.mark.asyncio
+async def test_context_provider_drops_empty_customer_phone(monkeypatch):
+    """caller_number 가 NULL/empty 일 때 customer_phone 키 자체가 비워진다."""
+    from app.agents.post_call.context_provider import get_call_context_for_post_call
+
+    async def fake_db(call_id, tenant_id=None):
+        return {
+            "metadata":    {"call_id": call_id, "tenant_id": "t", "customer_phone": None},
+            "transcripts": [],
+            "branch_stats": {},
+        }
+
+    monkeypatch.setattr(
+        "app.agents.post_call.context_provider.get_completed_call_context_from_db",
+        fake_db,
+    )
+
+    ctx = await get_call_context_for_post_call("phone-null-001")
+    assert ctx is not None
+    # action_planner 가 metadata.get("customer_phone", "") 로 안전하게 빈 문자열을
+    # 받을 수 있도록 키 자체를 비워 둔다.
+    assert "customer_phone" not in ctx["metadata"]
+    assert ctx["metadata"].get("customer_phone", "") == ""
+
+
+@pytest.mark.asyncio
+async def test_context_provider_preserves_existing_normalized_phone(monkeypatch):
+    """이미 정규화된 customer_phone 은 그대로 보존된다 (idempotent)."""
+    from app.agents.post_call.context_provider import get_call_context_for_post_call
+
+    async def fake_db(call_id, tenant_id=None):
+        return {
+            "metadata":    {"call_id": call_id, "tenant_id": "t", "customer_phone": "01098765432"},
+            "transcripts": [],
+            "branch_stats": {},
+        }
+
+    monkeypatch.setattr(
+        "app.agents.post_call.context_provider.get_completed_call_context_from_db",
+        fake_db,
+    )
+
+    ctx = await get_call_context_for_post_call("phone-keep-001")
+    assert ctx is not None
+    assert ctx["metadata"]["customer_phone"] == "01098765432"
+
+
 # ── 8. PostCallAgent partial_success=True → ok=True ─────────────────────────
 
 @pytest.mark.asyncio

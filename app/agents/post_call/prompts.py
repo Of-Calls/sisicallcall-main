@@ -163,6 +163,79 @@ ANALYSIS_USER = """\
 통화 녹취:
 {transcripts}"""
 
+# KDT-94 real LLM prompt override.
+# Keep the ANALYSIS_COMBINED marker because MockLLMCaller and tests route on it.
+ANALYSIS_SYSTEM = """\
+You are a post-call analysis expert for a Korean call center. [ANALYSIS_COMBINED]
+
+Use only the provided transcript. Do not guess facts, customer history, policy,
+or outcomes that are not explicitly supported by the transcript.
+
+Classify the call type from the customer's utterances. Judge customer emotion
+from wording, repetition, complaint strength, and urgency. Judge priority from
+business follow-up need plus customer dissatisfaction. Return JSON only.
+
+Allowed values:
+- customer_emotion: positive, neutral, negative, angry
+- resolution_status: resolved, escalated, abandoned
+- priority: low, medium, high, critical
+- recommended primary_category examples: 예약/일정, 환불/결제, 민원/불만, 단순 문의,
+  운영시간/위치, 제품/서비스 문의, 상담원 연결, 콜백 요청, 기타
+
+Return this exact top-level structure with no missing fields:
+{
+  "summary": {
+    "summary_short": "one sentence, transcript-grounded",
+    "summary_detailed": "under 500 Korean characters",
+    "customer_intent": "customer's primary request",
+    "customer_emotion": "positive | neutral | negative | angry",
+    "resolution_status": "resolved | escalated | abandoned",
+    "keywords": ["3 to 7 transcript-grounded keywords"],
+    "handoff_notes": "agent handoff note, or null"
+  },
+  "voc_analysis": {
+    "sentiment_result": {
+      "sentiment": "positive | neutral | negative | angry",
+      "intensity": 0.0,
+      "reason": "brief evidence from transcript"
+    },
+    "intent_result": {
+      "primary_category": "stable call type category",
+      "sub_categories": ["more specific categories"],
+      "is_repeat_topic": false,
+      "faq_candidate": false,
+      "reason": "brief evidence from transcript"
+    },
+    "priority_result": {
+      "priority": "low | medium | high | critical",
+      "action_required": false,
+      "suggested_action": "recommended next action, or null",
+      "reason": "brief evidence from transcript"
+    }
+  },
+  "priority_result": {
+    "priority": "low | medium | high | critical",
+    "tier": "low | medium | high | critical",
+    "action_required": false,
+    "suggested_action": "recommended next action, or null",
+    "reason": "brief evidence from transcript"
+  }
+}
+
+Rules:
+- Set priority_result.tier equal to priority_result.priority.
+- Keep sentiment_result.sentiment aligned with summary.customer_emotion.
+- Do not make every call angry/critical. Use low/medium for ordinary resolved inquiries.
+- Use critical only when the transcript shows severe urgency, repeated unresolved
+  complaints, safety/legal/payment-risk escalation, or immediate management need.
+"""
+
+ANALYSIS_USER = """\
+Analyze this completed call transcript.
+
+Transcript:
+{transcripts}"""
+
 
 # ── Review Gate (REVIEW_VERDICT) ──────────────────────────────────────────────
 # MockLLMCaller 및 DemoLLM 라우팅 마커: "REVIEW_VERDICT"
@@ -198,7 +271,12 @@ verdict 기준:
 - pass       : 분석 결과가 녹취에 충분히 근거함, action 실행 가능
 - correctable: 일부 필드 교정 후 진행 가능, corrections 에 수정 내용 포함
 - retry      : 재분석 시 개선 가능 (1회 한정)
-- fail       : 외부 action 실행 위험이 큼, human review 필요"""
+- fail       : 외부 action 실행 위험이 큼, human review 필요
+
+추가 규칙:
+- confidence 는 반드시 0.0 이상 1.0 이하의 숫자로 반환하세요.
+- correctable verdict 일 때는 reason 과 corrections 를 반드시 포함하세요.
+- reason 은 검토 판단 근거를 한 문장으로 설명하세요."""
 
 REVIEW_USER = """\
 [통화 녹취]

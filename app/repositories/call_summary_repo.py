@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime, timezone
+from uuid import UUID
 
+import asyncpg
+
+from app.utils.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,6 +37,62 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _database_url() -> str:
+    return settings.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _is_uuid(value: str | None) -> bool:
+    try:
+        UUID(str(value))
+        return True
+    except Exception:
+        return False
+
+
+def _json_dumps(value) -> str:
+    return json.dumps(value if value is not None else [], ensure_ascii=False)
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return copy.deepcopy(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _summary_db_payload(summary: dict) -> dict:
+    emotion = summary.get("customer_emotion") or summary.get("emotion") or "neutral"
+    if emotion not in {"positive", "neutral", "negative", "angry"}:
+        emotion = "neutral"
+
+    resolution_status = (
+        summary.get("resolution_status")
+        or summary.get("status")
+        or "resolved"
+    )
+    if resolution_status not in {"resolved", "escalated", "abandoned"}:
+        resolution_status = "resolved"
+
+    generation_mode = summary.get("generation_mode") or "async"
+    if generation_mode not in {"sync", "async"}:
+        generation_mode = "async"
+
+    return {
+        "summary_short": summary.get("summary_short") or summary.get("short") or "",
+        "summary_detailed": summary.get("summary_detailed") or summary.get("detailed"),
+        "customer_intent": summary.get("customer_intent") or summary.get("intent"),
+        "customer_emotion": emotion,
+        "resolution_status": resolution_status,
+        "keywords": _as_list(summary.get("keywords")),
+        "handoff_notes": summary.get("handoff_notes"),
+        "generation_mode": generation_mode,
+        "model_used": summary.get("model_used") or summary.get("model") or "demo-mock-llm",
+    }
+
+
 def _reset() -> None:
     """테스트 격리용 — 모든 store를 초기화한다."""
     _summary_store.clear()
@@ -55,6 +116,121 @@ async def save_summary(
         "updated_at": now,
     }
     logger.debug("summary saved call_id=%s", call_id)
+    await _upsert_summary_to_db_if_possible(call_id, tenant_id, summary)
+
+
+async def _upsert_summary_to_db_if_possible(
+    call_id: str,
+    tenant_id: str,
+    summary: dict,
+) -> None:
+    if not _is_uuid(call_id):
+        logger.warning(
+            "summary db save skipped non_uuid_call_id=%s tenant_id=%s",
+            call_id,
+            tenant_id,
+        )
+        return
+
+    payload = _summary_db_payload(summary)
+    conn = None
+    try:
+        conn = await asyncpg.connect(_database_url())
+        call_tenant_id = await _fetch_call_tenant_id(conn, call_id)
+        if call_tenant_id is None:
+            logger.warning(
+                "post_call call not found: skip summary db save call_id=%s state_tenant_id=%s",
+                call_id,
+                tenant_id,
+            )
+            return
+
+        if call_tenant_id.lower() != str(tenant_id).lower():
+            logger.warning(
+                "post_call tenant mismatch: skip summary save call_id=%s state_tenant_id=%s call_tenant_id=%s",
+                call_id,
+                tenant_id,
+                call_tenant_id,
+            )
+            return
+
+        await conn.execute(
+            """
+            INSERT INTO call_summaries (
+              call_id,
+              tenant_id,
+              summary_short,
+              summary_detailed,
+              customer_intent,
+              customer_emotion,
+              resolution_status,
+              keywords,
+              handoff_notes,
+              generation_mode,
+              model_used,
+              updated_at
+            )
+            VALUES (
+              $1::uuid,
+              $2::uuid,
+              $3,
+              $4,
+              $5,
+              $6,
+              $7,
+              $8::jsonb,
+              $9,
+              $10,
+              $11,
+              now()
+            )
+            ON CONFLICT (call_id)
+            DO UPDATE SET
+              tenant_id = EXCLUDED.tenant_id,
+              summary_short = EXCLUDED.summary_short,
+              summary_detailed = EXCLUDED.summary_detailed,
+              customer_intent = EXCLUDED.customer_intent,
+              customer_emotion = EXCLUDED.customer_emotion,
+              resolution_status = EXCLUDED.resolution_status,
+              keywords = EXCLUDED.keywords,
+              handoff_notes = EXCLUDED.handoff_notes,
+              generation_mode = EXCLUDED.generation_mode,
+              model_used = EXCLUDED.model_used,
+              updated_at = now()
+            """,
+            call_id,
+            tenant_id,
+            payload["summary_short"],
+            payload["summary_detailed"],
+            payload["customer_intent"],
+            payload["customer_emotion"],
+            payload["resolution_status"],
+            _json_dumps(payload["keywords"]),
+            payload["handoff_notes"],
+            payload["generation_mode"],
+            payload["model_used"],
+        )
+        logger.info("call_summaries db upserted call_id=%s", call_id)
+    except Exception as exc:
+        logger.warning("call_summaries db upsert failed call_id=%s err=%s", call_id, exc)
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+async def _fetch_call_tenant_id(conn, call_id: str) -> str | None:
+    row = await conn.fetchrow(
+        """
+        SELECT tenant_id
+        FROM calls
+        WHERE id = $1::uuid
+        LIMIT 1
+        """,
+        call_id,
+    )
+    if row is None:
+        return None
+    return str(row["tenant_id"])
 
 
 async def get_summary_by_call_id(

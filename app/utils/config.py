@@ -55,13 +55,6 @@ class Settings(BaseSettings):
     titanet_similarity_threshold: float = 0.30
     titanet_enrollment_sec: float = 3.0   # voiceprint 등록에 사용할 첫 발화 누적 시간
 
-    # WebRTC VAD (주미 연구 결과 — webrtc_vad 채택). 2026-04-30 Silero 로 교체.
-    # 보존 사유: rollback 안전판 (call.py / vad_node.py 의 import 1줄 환원으로 즉시 복구).
-    webrtc_mode: int = 3                        # aggressiveness 0~3 (3: 최대 잡음 제거)
-    webrtc_frame_ms: int = 30                   # 프레임 크기 ms (10/20/30 중 택일)
-    webrtc_speech_ratio_threshold: float = 0.5  # 프레임 중 발화 비율 임계값
-    webrtc_energy_fallback_threshold: int = 1200 # webrtcvad 미설치 시 energy fallback RMS 임계값
-
     # Silero VAD (v6.2+, 2026-04-30 채택 — 짧은 발화 + 긴 trailing silence reject 해결).
     # logs/2026-04-30/server_100651.log Turn 4/5 사례: "예약은어떻게해요" 0.5s + trailing 1.3s
     # → WebRTC bulk ratio 28~38% reject → graph END. Silero per-frame 누적으로 해결.
@@ -112,6 +105,13 @@ class Settings(BaseSettings):
     auth_session_ttl_sec: int = 600
     auth_enable_test_register: bool = False
     auth_web_base_url: str = "http://localhost:3000"
+
+    # Vision (정수기 모델 분류 — TorchScript 단일 파일)
+    # metadata JSON 안에 input_size, normalize_mean/std, classes 정의.
+    # device="auto" 시 cuda 가능하면 cuda, 아니면 cpu 자동 선택.
+    vision_model_path: str = "models/water_purifier_convnextv2_femto_scripted.pt"
+    vision_metadata_path: str = "models/water_purifier_convnextv2_femto_metadata.json"
+    vision_device: str = "auto"
 
     # extra="ignore" — .env 에 코드에서 제거된 잔여 키(예: 과거 GOOGLE_APPLICATION_CREDENTIALS)
     # 가 있어도 ValidationError 로 죽지 않게. 신규 키는 위 클래스 필드로 명시 정의 필요.

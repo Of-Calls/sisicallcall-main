@@ -4,7 +4,7 @@
 - 모든 함수 best-effort. asyncpg 예외는 흡수 + WARNING 로그만 남기고 None 반환.
 - DB 다운 / connection 고갈 / schema 불일치 시에도 통화 응대 자체는 막지 않는다.
 
-connection pool 미사용 — `_tenant_helpers.py` 와 동일하게 per-call asyncpg.connect.
+connection pool 미사용 — `app/services/tenant.py` 와 동일하게 per-call asyncpg.connect.
 풀 도입 시 본 모듈만 수정 (`_OPEN_ISSUES.md` 의 asyncpg pool 항목).
 """
 import json

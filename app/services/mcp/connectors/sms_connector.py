@@ -18,8 +18,15 @@ SMS MCP Connector.
   result: {to, message, sent, mock}
 
 ── 고객 전화번호 없음 ───────────────────────────────────────────────────────
-  params.to 또는 params.customer_phone 중 하나라도 있어야 한다.
-  없으면 skipped("customer_phone_missing") 반환.
+  수신번호 결정 우선순위:
+    1) params.to
+    2) params.customer_phone
+    3) os.getenv("SMS_TEST_TO")  ← 운영 외 환경 fallback
+  세 가지 모두 비어있을 때만 skipped("customer_phone_missing") 반환.
+
+  SMS_TEST_TO fallback 이 사용되면 logger.warning 으로 명시한다 — 운영
+  배포 시 이 변수가 남아 있으면 의도치 않은 발송이 일어날 수 있으므로
+  로그에서 가시적으로 추적 가능해야 한다. 운영에서는 unset 또는 빈 값.
 
 ── API key/secret 원문은 로그/result/error에 절대 출력하지 않는다. ─────────
 """
@@ -29,6 +36,7 @@ import os
 
 from app.services.mcp.connectors.base import BaseMCPConnector
 from app.utils.logger import get_logger
+from app.utils.phone import normalize_korean_phone
 
 logger = get_logger(__name__)
 
@@ -59,6 +67,15 @@ class SMSConnector(BaseMCPConnector):
         )
 
         to = params.get("to") or params.get("customer_phone")
+        if not to:
+            test_to = (os.getenv("SMS_TEST_TO") or "").strip()
+            if test_to:
+                to = normalize_korean_phone(test_to) or test_to
+                logger.warning(
+                    "SMSConnector: customer_phone 없음 — SMS_TEST_TO fallback 사용 call_id=%s",
+                    call_id,
+                )
+
         if not to:
             logger.warning("SMSConnector: 고객 전화번호 없음 call_id=%s", call_id)
             return self._skipped("customer_phone_missing")

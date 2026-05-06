@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>시시콜콜 사진 업로드</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,sans-serif;background:#f5f5f5;min-height:100vh;display:flex;align-items:center;justify-content:center}
+    .card{background:#fff;border-radius:16px;padding:24px;max-width:420px;width:100%;margin:16px;box-shadow:0 2px 16px rgba(0,0,0,.08)}
+    h2{font-size:20px;margin-bottom:4px}
+    .subtitle{font-size:12px;color:#999;margin-bottom:20px;word-break:break-all}
+    .step{border-radius:10px;padding:16px;margin:10px 0;border:1px solid #e0e0e0;transition:.2s}
+    .step.active{border-color:#1976D2;background:#f5faff}
+    .step.done{border-color:#4CAF50;background:#e8f5e9}
+    .step.fail{border-color:#f44336;background:#ffebee}
+    .step-title{font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+    .badge{font-size:11px;padding:2px 8px;border-radius:12px;background:#e0e0e0;color:#555}
+    .badge.ok{background:#c8e6c9;color:#2e7d32}
+    button{width:100%;padding:13px;font-size:15px;font-weight:600;border:none;border-radius:8px;cursor:pointer;margin-top:8px;transition:.15s}
+    .btn-primary{background:#1976D2;color:#fff}
+    .btn-primary:disabled{background:#90CAF9;cursor:not-allowed}
+    .btn-blue{background:#1976D2;color:#fff}
+    .file-row{display:flex;gap:8px;margin:10px 0}
+    .file-row label{flex:1;text-align:center;padding:13px;background:#1976D2;color:#fff;border-radius:8px;font-weight:600;cursor:pointer}
+    .file-row label:active{background:#1565C0}
+    input[type=file]{display:none}
+    img.preview{width:100%;border-radius:8px;margin:8px 0;max-height:320px;object-fit:contain;background:#000}
+    #status{text-align:center;font-size:13px;color:#666;padding:8px 0;min-height:20px}
+    .label-display{font-size:32px;font-weight:700;text-align:center;margin:12px 0;color:#2e7d32}
+    .confidence{font-size:14px;color:#666;text-align:center}
+  </style>
+</head>
+<body>
+<div class="card">
+  <h2>시시콜콜 사진 업로드</h2>
+  <p class="subtitle" id="vision-id-label"></p>
+
+  <div class="step active" id="step1">
+    <div class="step-title">사진 선택 <span class="badge" id="b1">대기</span></div>
+    <p style="font-size:13px;color:#555;margin-bottom:8px">정수기를 정면에서 촬영하거나 갤러리에서 선택해주세요.</p>
+    <div class="file-row">
+      <label for="cam">📷 카메라</label>
+      <label for="gal">🖼 갤러리</label>
+    </div>
+    <input type="file" id="cam" accept="image/*" capture="environment" onchange="previewFile(this)">
+    <input type="file" id="gal" accept="image/*" onchange="previewFile(this)">
+    <img id="preview" class="preview" style="display:none" alt="">
+    <button class="btn-primary" id="btn-upload" onclick="uploadImage()" disabled>업로드 후 분석</button>
+  </div>
+
+  <div class="step" id="step2" style="display:none">
+    <div class="step-title">분석 결과 <span class="badge" id="b2"></span></div>
+    <div class="label-display" id="label-display"></div>
+    <p class="confidence" id="conf-display"></p>
+    <p id="result-msg" style="text-align:center;font-size:14px;color:#555;margin-top:8px"></p>
+  </div>
+
+  <p id="status">사진을 선택해주세요.</p>
+</div>
+
+<script>
+const visionId = (() => {
+  const m = location.pathname.match(/\/vision\/([^\/]+)/);
+  return m ? m[1] : null;
+})();
+document.getElementById('vision-id-label').textContent = 'session: ' + visionId;
+let _selectedFile = null;
+
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+function previewFile(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  _selectedFile = f;
+  const url = URL.createObjectURL(f);
+  const img = document.getElementById('preview');
+  img.src = url;
+  img.style.display = 'block';
+  document.getElementById('btn-upload').disabled = false;
+  setStatus('업로드 준비 완료. 버튼을 눌러주세요.');
+}
+
+async function uploadImage() {
+  if (!_selectedFile) { setStatus('사진을 먼저 선택해주세요.'); return; }
+  document.getElementById('btn-upload').disabled = true;
+  setStatus('이미지 분석 중...');
+
+  const form = new FormData();
+  form.append('file', _selectedFile, 'capture.jpg');
+  try {
+    const r = await fetch('/vision/' + visionId + '/predict', {method:'POST', body:form});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.status);
+    showResult(data);
+  } catch(e) {
+    setStatus('오류: ' + e.message);
+    document.getElementById('btn-upload').disabled = false;
+  }
+}
+
+function showResult(data) {
+  document.getElementById('step1').className = 'step done';
+  document.getElementById('b1').textContent = '완료';
+  document.getElementById('b1').className = 'badge ok';
+  const step2 = document.getElementById('step2');
+  step2.style.display = 'block';
+  step2.className = 'step done';
+  document.getElementById('b2').textContent = '인식 완료';
+  document.getElementById('b2').className = 'badge ok';
+  document.getElementById('label-display').textContent = '✅ ' + data.label;
+  const conf = parseFloat(data.confidence || 0);
+  document.getElementById('conf-display').textContent = '신뢰도: ' + (conf * 100).toFixed(1) + '%';
+  document.getElementById('result-msg').textContent = '분석 결과가 준비됐어요. 통화 화면으로 돌아가 알려주시면 자세히 안내드릴게요.';
+  setStatus('완료!');
+}
+</script>
+</body>
+</html>

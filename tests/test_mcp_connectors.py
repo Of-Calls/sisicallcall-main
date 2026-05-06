@@ -1619,12 +1619,111 @@ async def test_sms_connector_real_mode_monkeypatched(monkeypatch):
 async def test_sms_connector_missing_phone_skipped(monkeypatch):
     from app.services.mcp.connectors.sms_connector import SMSConnector
     monkeypatch.delenv("SMS_MCP_REAL", raising=False)
+    # SMS_TEST_TO fallback 이 .env 에서 새지 않도록 격리.
+    monkeypatch.delenv("SMS_TEST_TO", raising=False)
 
     connector = SMSConnector()
     result = await connector.execute("send_callback_sms", {}, call_id="sms-noPhone")
 
     assert result["status"] == "skipped"
     assert result["error"] == "customer_phone_missing"
+
+
+# ── 36-b. SMSConnector: SMS_TEST_TO fallback ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_sms_connector_uses_sms_test_to_fallback(monkeypatch):
+    """customer_phone 부재 + SMS_TEST_TO 설정 → fallback 으로 발송된다."""
+    from app.services.mcp.connectors.sms_connector import SMSConnector
+    monkeypatch.delenv("SMS_MCP_REAL", raising=False)  # mock mode
+    monkeypatch.setenv("SMS_TEST_TO", "01088887777")
+
+    connector = SMSConnector()
+    result = await connector.execute("send_callback_sms", {}, call_id="sms-fallback-001")
+
+    assert result["status"] == "success"
+    assert result["external_id"] == "sms-mock-sms-fallback-001"
+    assert result["result"]["to"] == "01088887777"
+
+
+@pytest.mark.asyncio
+async def test_sms_connector_customer_phone_wins_over_sms_test_to(monkeypatch):
+    """params.customer_phone 가 있으면 SMS_TEST_TO 보다 우선된다."""
+    from app.services.mcp.connectors.sms_connector import SMSConnector
+    monkeypatch.delenv("SMS_MCP_REAL", raising=False)
+    monkeypatch.setenv("SMS_TEST_TO", "01088887777")  # 사용되면 안 됨
+
+    connector = SMSConnector()
+    result = await connector.execute(
+        "send_callback_sms",
+        {"customer_phone": "01012345678"},
+        call_id="sms-priority-001",
+    )
+
+    assert result["status"] == "success"
+    assert result["result"]["to"] == "01012345678"
+
+
+@pytest.mark.asyncio
+async def test_sms_connector_sms_test_to_normalized(monkeypatch):
+    """SMS_TEST_TO 가 하이픈/국가코드 포함 형식이어도 normalize_korean_phone 로 통일된다."""
+    from app.services.mcp.connectors.sms_connector import SMSConnector
+    monkeypatch.delenv("SMS_MCP_REAL", raising=False)
+    monkeypatch.setenv("SMS_TEST_TO", "+82-10-8888-7777")
+
+    connector = SMSConnector()
+    result = await connector.execute("send_callback_sms", {}, call_id="sms-norm-001")
+
+    assert result["status"] == "success"
+    assert result["result"]["to"] == "01088887777"
+
+
+@pytest.mark.asyncio
+async def test_sms_connector_empty_sms_test_to_still_skipped(monkeypatch):
+    """SMS_TEST_TO 가 빈 문자열/공백이면 fallback 적용 안 되고 skipped 된다."""
+    from app.services.mcp.connectors.sms_connector import SMSConnector
+    monkeypatch.delenv("SMS_MCP_REAL", raising=False)
+    monkeypatch.setenv("SMS_TEST_TO", "   ")
+
+    connector = SMSConnector()
+    result = await connector.execute("send_callback_sms", {}, call_id="sms-empty-fallback")
+
+    assert result["status"] == "skipped"
+    assert result["error"] == "customer_phone_missing"
+
+
+@pytest.mark.asyncio
+async def test_sms_connector_fallback_logs_warning(monkeypatch):
+    """SMS_TEST_TO fallback 사용 시 운영 가시성을 위해 warning 로그가 남는다.
+
+    프로젝트 logger 가 propagate=False 이므로 caplog 대신 핸들러를 직접 부착해
+    레코드를 수집한다.
+    """
+    import logging
+    from app.services.mcp.connectors import sms_connector as sms_mod
+    from app.services.mcp.connectors.sms_connector import SMSConnector
+
+    monkeypatch.delenv("SMS_MCP_REAL", raising=False)
+    monkeypatch.setenv("SMS_TEST_TO", "01088887777")
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Capture(level=logging.WARNING)
+    sms_mod.logger.addHandler(handler)
+    try:
+        connector = SMSConnector()
+        await connector.execute("send_callback_sms", {}, call_id="sms-warn-001")
+    finally:
+        sms_mod.logger.removeHandler(handler)
+
+    assert any(
+        "SMS_TEST_TO fallback" in rec.getMessage() and "sms-warn-001" in rec.getMessage()
+        for rec in records
+    )
 
 
 # ── 37. SMSConnector: send_voc_receipt_sms 템플릿 ────────────────────────────

@@ -5,6 +5,7 @@ import json
 import os
 
 from app.services.llm.base import BaseLLMService
+from app.utils.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,14 +16,96 @@ _RETRY_SUFFIX = (
     "No markdown fences, no explanations, no extra text of any kind."
 )
 
+_MODE_MOCK = "mock"
+_MODE_REAL = "real"
+_DEFAULT_MODEL = "gpt-4o-mini"
+
+
+# ── Token usage helpers ───────────────────────────────────────────────────────
+#
+# Estimated development-only pricing. Verify against OpenAI billing/pricing
+# before using for production reporting. Prices are per 1M tokens (USD).
+MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "gpt-4o":      {"input": 2.50, "output": 10.00},
+    "gpt-4-turbo": {"input": 10.00, "output": 30.00},
+}
+
+
+def _empty_usage() -> dict:
+    return {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+
+
+def extract_openai_usage(response: object) -> dict:
+    """Extract token usage from an OpenAI chat completion response.
+
+    Supports both attribute access (typical SDK objects) and dict shape.
+    Missing fields are returned as None. Never raises.
+    """
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+        if usage is None:
+            return _empty_usage()
+        if isinstance(usage, dict):
+            return {
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+            }
+        return {
+            "prompt_tokens": getattr(usage, "prompt_tokens", None),
+            "completion_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        }
+    except Exception:
+        return _empty_usage()
+
+
+def compute_estimated_cost_usd(
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    model: str | None,
+) -> float | None:
+    """Estimate USD cost for a (prompt, completion, model) tuple.
+
+    Returns None when the model is unknown or token counts are missing.
+    Cost is rounded to 6 decimal places.
+    """
+    if not model:
+        return None
+    pricing = MODEL_PRICING_USD_PER_1M.get(model)
+    if not pricing:
+        return None
+    pt = prompt_tokens or 0
+    ct = completion_tokens or 0
+    if pt == 0 and ct == 0:
+        return None
+    cost = (pt / 1_000_000) * pricing["input"] + (ct / 1_000_000) * pricing["output"]
+    return round(cost, 6)
+
 
 # ── 실제 LLM 래퍼 ─────────────────────────────────────────────────────────────
 
 class PostCallLLMCaller:
-    """BaseLLMService 래퍼 — JSON 응답 파싱 + 1회 재시도."""
+    """BaseLLMService 래퍼 — JSON 응답 파싱 + 1회 재시도.
 
-    def __init__(self, provider: BaseLLMService) -> None:
+    Provider가 ``_last_usage`` 속성으로 토큰 사용량을 노출하면 (예:
+    ``PostCallOpenAIService``), 결과 dict에 ``_llm_usage`` 메타데이터를
+    덧붙여 후속 노드가 batch report에 집계할 수 있도록 한다.
+    """
+
+    def __init__(
+        self,
+        provider: BaseLLMService,
+        *,
+        fallback: "MockLLMCaller | None" = None,
+        purpose: str = "post_call",
+    ) -> None:
         self._provider = provider
+        self._fallback = fallback
+        self._purpose = purpose
 
     async def call_json(
         self,
@@ -30,28 +113,145 @@ class PostCallLLMCaller:
         user_message: str,
         max_tokens: int = 1024,
     ) -> dict:
-        raw = await self._provider.generate(
-            system_prompt=system_prompt,
-            user_message=user_message,
-            temperature=0.0,
-            max_tokens=max_tokens,
-        )
-        result, ok = _try_parse(raw)
-        if ok:
-            return result
+        accumulated = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        has_usage = False
 
-        logger.warning("JSON 파싱 실패 — 1회 재시도 raw_preview=%r", raw[:200])
-        raw2 = await self._provider.generate(
-            system_prompt=system_prompt + _RETRY_SUFFIX,
-            user_message=user_message,
-            temperature=0.0,
-            max_tokens=max_tokens,
-        )
-        result2, ok2 = _try_parse(raw2)
-        if ok2:
-            return result2
+        try:
+            raw = await self._provider.generate(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                temperature=0.0,
+                max_tokens=max_tokens,
+            )
+            has_usage = self._accumulate_provider_usage(accumulated) or has_usage
 
-        raise ValueError(f"LLM JSON 파싱 2회 연속 실패. last_raw={raw2[:300]!r}")
+            result, ok = _try_parse(raw)
+            if ok:
+                self._attach_usage(result, accumulated, has_usage, fallback=False)
+                return result
+
+            logger.warning("post_call real LLM JSON parse failed; retrying raw_preview=%r", raw[:200])
+            raw2 = await self._provider.generate(
+                system_prompt=system_prompt + _RETRY_SUFFIX,
+                user_message=user_message,
+                temperature=0.0,
+                max_tokens=max_tokens,
+            )
+            has_usage = self._accumulate_provider_usage(accumulated) or has_usage
+
+            result2, ok2 = _try_parse(raw2)
+            if ok2:
+                self._attach_usage(result2, accumulated, has_usage, fallback=False)
+                return result2
+
+            raise ValueError(f"LLM JSON parse failed twice. last_raw={raw2[:300]!r}")
+        except Exception as exc:
+            if self._fallback is not None:
+                logger.warning(
+                    "post_call real LLM failed purpose=%s err=%s; falling back to mock",
+                    self._purpose,
+                    exc,
+                )
+                fallback_result = await self._fallback.call_json(
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    max_tokens=max_tokens,
+                )
+                if isinstance(fallback_result, dict):
+                    fallback_result = copy.deepcopy(fallback_result)
+                    fallback_result["_llm_fallback"] = True
+                    fallback_result["_llm_fallback_reason"] = str(exc)
+                    self._attach_usage(fallback_result, accumulated, has_usage, fallback=True)
+                return fallback_result
+            raise
+
+    def _accumulate_provider_usage(self, accumulated: dict) -> bool:
+        """Pull provider's last usage into the accumulator. Returns True if any tokens were added."""
+        usage = getattr(self._provider, "_last_usage", None)
+        if not isinstance(usage, dict):
+            return False
+        added = False
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(key)
+            if value is not None:
+                accumulated[key] = (accumulated[key] or 0) + int(value)
+                added = True
+        return added
+
+    def _attach_usage(
+        self,
+        result: object,
+        accumulated: dict,
+        has_usage: bool,
+        *,
+        fallback: bool,
+    ) -> None:
+        if not isinstance(result, dict):
+            return
+        model = getattr(self._provider, "model", None)
+        if has_usage:
+            result["_llm_usage"] = {
+                "purpose": self._purpose,
+                "model": model,
+                "prompt_tokens": accumulated["prompt_tokens"],
+                "completion_tokens": accumulated["completion_tokens"],
+                "total_tokens": accumulated["total_tokens"],
+                "source": "openai",
+                "fallback": fallback,
+            }
+        elif fallback:
+            result["_llm_usage"] = {
+                "purpose": self._purpose,
+                "model": model,
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+                "source": "fallback",
+                "fallback": True,
+            }
+
+
+class PostCallOpenAIService(BaseLLMService):
+    """Post-call scoped OpenAI chat provider with runtime model selection."""
+
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or get_post_call_llm_model()
+        self._client = None
+        # Last response token usage (set after each generate() call). Read by
+        # PostCallLLMCaller to attach to result dicts as `_llm_usage`.
+        self._last_usage: dict | None = None
+
+    def _api_key(self) -> str:
+        return os.environ.get("OPENAI_API_KEY") or settings.openai_api_key
+
+    def _get_client(self):
+        if not self._api_key():
+            raise RuntimeError("OPENAI_API_KEY is required for POST_CALL_LLM_MODE=real")
+        if self._client is None:
+            from openai import AsyncOpenAI  # noqa: PLC0415
+
+            self._client = AsyncOpenAI(api_key=self._api_key())
+        return self._client
+
+    async def generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        temperature: float = 0.1,
+        max_tokens: int = 512,
+    ) -> str:
+        response = await self._get_client().chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=min(temperature, 0.2),
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        self._last_usage = extract_openai_usage(response)
+        return response.choices[0].message.content or ""
 
 
 # ── 로컬 Mock (POST_CALL_USE_REAL_LLM 미설정 시 기본) ────────────────────────
@@ -181,12 +381,57 @@ def _try_parse(text: str) -> tuple[dict, bool]:
         return {}, False
 
 
-def _use_real_llm() -> bool:
-    """POST_CALL_USE_REAL_LLM=true 일 때만 실제 Provider 를 사용한다.
+def get_post_call_llm_mode() -> str:
+    """Resolve post-call LLM mode.
 
-    함수 호출 시점에 env var 을 평가하므로 테스트에서 os.environ 을 변경해도 반영된다.
+    POST_CALL_LLM_MODE is the preferred switch. The legacy
+    POST_CALL_USE_REAL_LLM=true flag is still honored when the new mode is not
+    set, so existing local scripts keep working.
     """
-    return os.environ.get("POST_CALL_USE_REAL_LLM", "").lower() == "true"
+    raw = os.environ.get("POST_CALL_LLM_MODE")
+    if raw is not None:
+        mode = raw.strip().lower()
+        if mode in {_MODE_MOCK, _MODE_REAL}:
+            return mode
+        logger.warning("unknown POST_CALL_LLM_MODE=%s; falling back to mock", raw)
+        return _MODE_MOCK
+
+    legacy = os.environ.get("POST_CALL_USE_REAL_LLM", "").strip().lower()
+    if legacy in {"1", "true", "yes", "on"}:
+        return _MODE_REAL
+    return _MODE_MOCK
+
+
+def _use_real_llm() -> bool:
+    return get_post_call_llm_mode() == _MODE_REAL
+
+
+def get_post_call_llm_model() -> str:
+    return os.environ.get("POST_CALL_LLM_MODEL", "").strip() or _DEFAULT_MODEL
+
+
+def describe_post_call_llm() -> str:
+    if _use_real_llm():
+        return f"OpenAI Real LLM ({get_post_call_llm_model()})"
+    return "Demo Mock LLM"
+
+
+def post_call_openai_key_available() -> bool:
+    return bool(os.environ.get("OPENAI_API_KEY") or settings.openai_api_key)
+
+
+def _make_caller(purpose: str) -> PostCallLLMCaller | MockLLMCaller:
+    if _use_real_llm():
+        model = get_post_call_llm_model()
+        logger.info("POST_CALL_LLM_MODE=real - OpenAI model=%s purpose=%s", model, purpose)
+        return PostCallLLMCaller(
+            PostCallOpenAIService(model=model),
+            fallback=MockLLMCaller(),
+            purpose=purpose,
+        )
+
+    logger.debug("POST_CALL_LLM_MODE=mock - MockLLMCaller purpose=%s", purpose)
+    return MockLLMCaller()
 
 
 # ── 팩토리 함수 ───────────────────────────────────────────────────────────────
@@ -195,46 +440,20 @@ def _use_real_llm() -> bool:
 # 여기서 실제 Provider 를 import 하지 않아도 된다.
 
 def make_summary_caller() -> PostCallLLMCaller | MockLLMCaller:
-    if _use_real_llm():
-        # pydantic_settings / openai 는 실제 사용 시점에만 import
-        from app.services.llm.gpt4o import GPT4OService  # noqa: PLC0415
-        logger.info("POST_CALL_USE_REAL_LLM=true — GPT4OService 사용 (summary)")
-        return PostCallLLMCaller(GPT4OService())
-    logger.debug("POST_CALL_USE_REAL_LLM 미설정 — MockLLMCaller 사용 (summary)")
-    return MockLLMCaller()
+    return _make_caller("summary")
 
 
 def make_voc_caller() -> PostCallLLMCaller | MockLLMCaller:
-    if _use_real_llm():
-        from app.services.llm.gpt4o import GPT4OService  # noqa: PLC0415
-        logger.info("POST_CALL_USE_REAL_LLM=true — GPT4OService 사용 (voc)")
-        return PostCallLLMCaller(GPT4OService())
-    logger.debug("POST_CALL_USE_REAL_LLM 미설정 — MockLLMCaller 사용 (voc)")
-    return MockLLMCaller()
+    return _make_caller("voc")
 
 
 def make_priority_caller() -> PostCallLLMCaller | MockLLMCaller:
-    if _use_real_llm():
-        from app.services.llm.gpt4o_mini import GPT4OMiniService  # noqa: PLC0415
-        logger.info("POST_CALL_USE_REAL_LLM=true — GPT4OMiniService 사용 (priority)")
-        return PostCallLLMCaller(GPT4OMiniService())
-    logger.debug("POST_CALL_USE_REAL_LLM 미설정 — MockLLMCaller 사용 (priority)")
-    return MockLLMCaller()
+    return _make_caller("priority")
 
 
 def make_analysis_caller() -> PostCallLLMCaller | MockLLMCaller:
-    if _use_real_llm():
-        from app.services.llm.gpt4o import GPT4OService  # noqa: PLC0415
-        logger.info("POST_CALL_USE_REAL_LLM=true — GPT4OService 사용 (analysis)")
-        return PostCallLLMCaller(GPT4OService())
-    logger.debug("POST_CALL_USE_REAL_LLM 미설정 — MockLLMCaller 사용 (analysis)")
-    return MockLLMCaller()
+    return _make_caller("analysis")
 
 
 def make_review_caller() -> PostCallLLMCaller | MockLLMCaller:
-    if _use_real_llm():
-        from app.services.llm.gpt4o import GPT4OService  # noqa: PLC0415
-        logger.info("POST_CALL_USE_REAL_LLM=true — GPT4OService 사용 (review)")
-        return PostCallLLMCaller(GPT4OService())
-    logger.debug("POST_CALL_USE_REAL_LLM 미설정 — MockLLMCaller 사용 (review)")
-    return MockLLMCaller()
+    return _make_caller("review")

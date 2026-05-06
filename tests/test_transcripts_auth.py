@@ -68,7 +68,7 @@ class SileroVADService:
 silero_stub.SileroVADService = SileroVADService
 sys.modules.setdefault("app.services.vad.silero_vad", silero_stub)
 
-from app.api.v1 import admin_auth, call
+from app.api.v1 import admin_auth, call_history
 from app.core.security import create_access_token
 from app.repositories import transcript_repo
 
@@ -82,7 +82,7 @@ EMAIL = "admin@example.test"
 
 def _client() -> TestClient:
     app = FastAPI()
-    app.include_router(call.router, prefix="/call")
+    app.include_router(call_history.router, prefix="/call")
     return TestClient(app)
 
 
@@ -157,7 +157,7 @@ def test_transcripts_with_valid_token_returns_200(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(call, "get_transcripts_by_call_id", fake_get_transcripts_by_call_id)
+    monkeypatch.setattr(call_history, "get_transcripts_by_call_id", fake_get_transcripts_by_call_id)
 
     resp = _client().get(f"/call/{CALL_ID}/transcripts", headers=_auth_headers())
 
@@ -174,7 +174,7 @@ def test_transcripts_other_tenant_call_returns_404(monkeypatch):
         assert tenant_id == TENANT_ID
         return None
 
-    monkeypatch.setattr(call, "get_transcripts_by_call_id", fake_get_transcripts_by_call_id)
+    monkeypatch.setattr(call_history, "get_transcripts_by_call_id", fake_get_transcripts_by_call_id)
 
     resp = _client().get(f"/call/{CALL_ID}/transcripts", headers=_auth_headers())
 

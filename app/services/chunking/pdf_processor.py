@@ -414,8 +414,13 @@ class PDFProcessor:
         tenant_id: str,
         file_name: str,
         industry: str,
+        doc_type: str = "general",
     ) -> str:
-        """PDF → 청킹 → 임베딩 → ChromaDB 저장. document_id 반환."""
+        """PDF → 청킹 → 임베딩 → ChromaDB 저장. document_id 반환.
+
+        doc_type: ChromaDB 메타 분류. 일반 FAQ 는 "general" (기본값),
+        모델 사양 등 vision 관련 청크는 "model_spec" (별도 시드 스크립트에서 사용).
+        """
         existing = await self._find_existing_document(tenant_id, file_name)
         if existing:
             logger.info("duplicate detected, replacing doc_id=%s file=%s", existing["id"], file_name)
@@ -471,6 +476,13 @@ class PDFProcessor:
                         "llm_summary": llm_meta.get("summary", ""),
                         "llm_keywords": keywords_str,
                         "llm_topic": llm_meta.get("topic", "기타"),
+                        # 권한 게이트 플래그 — PDF 임베딩 시점은 항상 False.
+                        # 추후 프론트 admin UI 에서 청크별 토글 (title/summary 보고 사람이 결정).
+                        "is_auth": False,
+                        "is_vision": False,
+                        # 청크 분류 — vision 시드 스크립트는 "model_spec" 사용,
+                        # 일반 FAQ PDF 는 기본값 "general".
+                        "doc_type": doc_type,
                         # 디버그/검증용 — ChromaDB metadata 1KB 제한 회피로 800자 컷.
                         "polished_text": polished[:800],
                     },

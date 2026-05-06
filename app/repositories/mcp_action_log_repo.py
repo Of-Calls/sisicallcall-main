@@ -182,9 +182,11 @@ def _to_log_entry(action: dict, *, call_id: str, tenant_id: str, now: datetime) 
 
 async def save_action_logs(
     call_id: str,
-    tenant_id: str,
-    executed_actions: list[dict],
+    tenant_id: str | None = None,
+    executed_actions: list[dict] | None = None,
 ) -> None:
+    tenant_id = _normalize_tenant_id(tenant_id, call_id)
+    executed_actions = executed_actions or []
     if _get_store_mode() == _STORE_MODE_DB:
         await _save_action_logs_to_db(call_id, tenant_id, executed_actions)
         return
@@ -198,6 +200,13 @@ async def save_action_logs(
     _action_store.setdefault(call_id, []).extend(entries)
     _save_store_to_file(_action_store)
     logger.debug("action_logs saved call_id=%s count=%d", call_id, len(entries))
+
+
+def _normalize_tenant_id(tenant_id: str | None, call_id: str) -> str:
+    if tenant_id:
+        return str(tenant_id)
+    logger.warning("action_logs save without tenant_id call_id=%s", call_id)
+    return ""
 
 
 async def _save_action_logs_to_db(
@@ -415,9 +424,23 @@ async def _get_action_logs_from_db(
 # ── Backward-compatible class interface (used by save_result_node) ────────────
 
 class MCPActionLogRepository:
-    async def save_action_log(self, call_id: str, actions: list[dict]) -> None:
-        await save_action_logs(call_id=call_id, tenant_id="", executed_actions=actions)
-        logger.debug("action_log saved call_id=%s actions=%d", call_id, len(actions))
+    async def save_action_log(
+        self,
+        call_id: str,
+        actions: list[dict],
+        tenant_id: str | None = None,
+    ) -> None:
+        await save_action_logs(
+            call_id=call_id,
+            tenant_id=tenant_id,
+            executed_actions=actions,
+        )
+        logger.debug(
+            "action_log saved call_id=%s tenant_id=%s actions=%d",
+            call_id,
+            tenant_id or "",
+            len(actions),
+        )
 
     async def get_action_log(self, call_id: str) -> list[dict]:
         return await get_action_logs_by_call_id(call_id)

@@ -1,235 +1,130 @@
 from app.agents.conversational.state import CallState
-from app.agents.conversational.utils.stall import FALLBACK_MESSAGE, _run_with_stall
-from app.services.llm.base import BaseLLMService
+from app.services.embedding import get_embedder
 from app.services.llm.gpt4o_mini import GPT4OMiniService
-from app.services.rag.base import BaseRAGService
 from app.services.rag.chroma import ChromaRAGService
-from app.utils.logger import get_logger
 
-# FAQ 브랜치 — RAG + GPT-4o-mini 3초 하드컷 (RFC 001 v0.2 §6.8)
-# stall trigger 1초, TTSOutputChannel 경유
+_llm = GPT4OMiniService()
+_rag = ChromaRAGService()
 
-logger = get_logger(__name__)
+_TOP_K = 3
+# ChromaDB default L2 distance (BGE-M3 normalized) — 작을수록 유사.
+# 분포: 매우 관련 0.6~0.8, 약 관련 0.8~1.0, 무관 1.0+ (max √2 ≈ 1.41).
+# 0.85 — 한밭식당 검증 결과 정확히 매칭되는 청크는 0.6~0.85 범위에 분포.
+_DIST_THRESHOLD = 0.85
+# vision 게이트는 모델 식별 필요 신호만 잡으면 됨 — 일반 humanize 보다 느슨한 기준.
+# 0.95 — model_spec 청크가 top_k 안에 들어왔다는 사실 자체가 강한 신호.
+_VISION_GATE_THRESHOLD = 0.95
 
-_rag: BaseRAGService = ChromaRAGService()
-_llm: BaseLLMService = GPT4OMiniService()
+_POLITE_AUTH = "본인 인증이 필요한 정보예요. 인증 진행해드릴까요?"
+_POLITE_VISION = "확인하시려는 게 어떤 건지 사진으로 봐야 정확히 안내드릴 수 있어요. 사진 보내주실 수 있을까요?"
+_POLITE_NO_RESULT = "제가 잘 모르는 부분이에요. 상담원 연결해드릴까요?"
+_POLITE_DECLINE_FALLBACK = "알겠습니다. 그러면 다른 무엇을 도와드릴까요?"
 
-# 2026-04-28: 3.0 → 5.0 상향. 첫 turn LLM 응답이 3초 초과해 hardcut → raw chunk
-# fallback 으로 빠지는 사례 빈발 (165225.log:69, 90). stall scheduler 가 1.5초에
-# "잠시만요" 이미 발화하므로 hardcut 까지 시간을 늘려도 사용자 체감 동일.
-FAQ_LLM_TIMEOUT_SEC = 5.0
-RAG_TOP_K = 8           # ChromaDB 후보 풀 (re-rank 전)
-RAG_RERANK_TOP_N = 3    # hybrid score 정렬 후 LLM 에 전달할 상위 N
-# 2026-04-28: ChromaDB cosine distance 가 이 값 초과인 chunk 는 LLM 입력에서 제외.
-# 변경 이력:
-#   0.85 → opendataloader chunks (평균 898자) 가 너무 길어 BGE-M3 임베딩 dilute,
-#         "메뉴가 뭐가 있어요" 같은 짧은 일반 질문이 chunk_4 (메뉴) distance 0.91~1.04
-#         로 임계값 못 넘는 사례 발생 (195111.log:117, 199, 221).
-#   0.85 → 0.95 — 임계값 완화 + chunk 700자 분할로 distance 자체도 줄어들 것.
-RAG_DISTANCE_THRESHOLD = 0.95
-# Hybrid retrieval: query 와 chunk 의 llm_keywords 가 substring 매칭되면 거리 차감.
-# 매칭 keyword 1개당 -0.05 — 너무 크면 distance 무시, 너무 작으면 효과 미미. 측정 후 조정.
-RAG_KEYWORD_BONUS = 0.05
+_FAQ_SYSTEM_PROMPT = """당신은 매장 전화 상담 AI 입니다. 사용자의 질문에 RAG 검색 결과를 바탕으로 친절하게 답변하세요.
 
-
-def _hybrid_score(distance: float, query: str, llm_keywords: str) -> tuple[float, list[str]]:
-    """(hybrid_score, matched_keywords) — distance 에서 keyword overlap 만큼 차감."""
-    keywords = [k.strip() for k in (llm_keywords or "").split(",") if k.strip()]
-    if not keywords or not query:
-        return distance, []
-    matched = [kw for kw in keywords if kw in query]
-    return max(distance - RAG_KEYWORD_BONUS * len(matched), 0.0), matched
-
-# TODO(agents.md 이관): 담당자 배정 후 프롬프트를 agents.md 로 이관
-FAQ_SYSTEM_PROMPT = """당신은 전화 고객센터의 FAQ 응답 AI입니다. 사용자는 음성으로 답변을 듣습니다.
-반드시 아래 규칙을 지키세요.
-1) 제공된 '참고 자료' 범위 안에서만 답변합니다.
-2) **참고 자료에 답이 없거나 질문과 직접 관련이 없을 때, 절대 첫 시도부터 "담당자에게 연결" 이라고 답하지 마세요.**
-   입력에 'rag_miss_count' 가 포함되어 있고 참고 자료가 부족하거나 관련이 없을 때:
-     - rag_miss_count == 1 (첫 시도):
-       ① 참고 자료가 아예 없는 경우: "제가 그 부분은 잘 모르겠습니다. 어떤 부분이 궁금하신가요?" 형태로
-          모른다는 사실 + 짧은 재질문 한 문장으로만 응답하세요. 정보를 만들지 마세요.
-       ② 참고 자료가 있지만 고객 질문과 직접 다른 내용인 경우:
-          참고 자료에서 안내 가능한 인접 정보를 1가지만 짧게 언급하고 대안을 제시하세요.
-          예: 고객이 "주차장 위치"를 물었는데 자료에 "주차 단속, 과태료" 정보만 있다면
-              → "주차장 위치는 안내드리기 어렵지만, 주정차 과태료나 견인 차량 관련해서는 도움드릴 수 있어요."
-          예: "해당 정보는 안내가 어렵지만, [참고 자료 내 관련 주제]에 대해서는 말씀드릴 수 있어요."
-       (★음성 통화 응답이므로 사무적·기계적 표현 절대 금지. "제공되지 않았습니다",
-       "확인이 어렵습니다", "정보가 없습니다" 같은 시스템 응답 어투 사용 금지.
-       자연스러운 한국어 대화체로 답하세요: "잘 모르겠어요", "그 부분은 안내가 어려워서요" 같이.
-       나쁜 예: "교통 안내에 대한 정보는 제공되지 않았습니다. 어떤 부분이 궁금하신가요?"
-       좋은 예: "교통편은 잘 모르겠어요. 어떤 부분이 궁금하신가요?")
-     - rag_miss_count >= 2 (반복): "제가 안내드릴 수 있는 분야는 {available_categories} 입니다. 어떤 정보가 필요하신가요?"
-       형태로 입력의 'available_categories' 를 그대로 자연스럽게 안내하세요.
-       만약 available_categories 가 비어 있으면 일반적인 옵션 ("위치, 진료시간, 예약 등") 으로 안내하세요.
-3) **★최우선: 응답은 반드시 100자 이내, 1~2문장으로 끝낸다. 100자가 넘으면 안 된다.**
-4) 표/목록을 풀어서 길게 나열하지 말고, 핵심만 한 문장으로 요약한다.
-   (예: "평일 09:00~17:30, 토요일 09:00~12:00 운영됩니다." — 점심시간/예외사항은 묻지 않으면 생략)
-5) 한국어 존댓말로 자연스럽게 답한다.
-6) 참고 자료에 없는 정보를 추측하거나 생성하지 않는다.
-7) RAG miss 응답은 1~2문장으로 끝낸다. 정보를 만들지 않는다."""
-
-
-def _compose_user_message(
-    normalized_text: str,
-    rag_results: list[str],
-    rag_miss_count: int = 0,
-    available_categories: list[str] | None = None,
-) -> str:
-    if rag_results:
-        joined = "\n\n".join(f"[{i + 1}] {chunk}" for i, chunk in enumerate(rag_results))
-    else:
-        joined = "(참고 자료 없음)"
-    cats = available_categories or []
-    cats_line = ", ".join(cats) if cats else "(없음)"
-    return (
-        f"참고 자료:\n{joined}\n\n"
-        f"rag_miss_count: {rag_miss_count}\n"
-        f"available_categories: {cats_line}\n\n"
-        f"고객 질문: {normalized_text}"
-    )
-
-
-def _short_chunk_id(full_id: str) -> str:
-    """`{document_uuid}_chunk_{n}` → `chunk_{n}` (UUID 생략, 로그용)."""
-    if "_chunk_" in full_id:
-        return "chunk_" + full_id.rsplit("_chunk_", 1)[-1]
-    return full_id[:12]
+[지침]
+- 검색 결과 컨텍스트에 있는 사실만 사용. 없는 정보는 추측하지 마세요.
+- 한국어 한두 문장으로 자연스럽게 답변. 너무 길면 안 됨 (음성 안내).
+- "검색 결과", "문서에 따르면" 같은 메타 표현 금지. 매장 직원처럼 답하세요.
+- 컨텍스트에 답이 없으면: "그 부분은 제가 정확히 모르는데, 상담원 연결해드릴까요?"
+- 출력은 답변 텍스트만. 따옴표/머릿말 금지."""
 
 
 async def faq_branch_node(state: CallState) -> dict:
-    call_id = state["call_id"]
-    query_embedding = state.get("query_embedding") or []
-    prev_miss_count = state.get("rag_miss_count", 0)
+    query = state.get("rewritten_query") or state["user_text"]
+    user_text = state.get("user_text") or ""  # is_vision 게이트의 model_id substring 매칭용
+    tenant_id = state["tenant_id"]
 
-    # RAG 검색 — rag_probe_node 가 이미 top_k=8 결과를 캐싱했으면 재사용 (ChromaDB 중복 쿼리 방지)
-    rag_results: list[str] = []
-    if query_embedding:
-        try:
-            rag_meta = state.get("rag_top_k_raw") or []
-            if not rag_meta:
-                rag_meta = await _rag.search_with_meta(
-                    query_embedding=query_embedding,
-                    tenant_id=state["tenant_id"],
-                    top_k=RAG_TOP_K,
-                )
-            # Hybrid score: distance 에서 query 와 chunk metadata 의 llm_keywords 매칭만큼 차감.
-            # ChromaDB metadata.llm_keywords 는 chunking 시 LLM 추출 ("메뉴, 한정식, 코스" 같은 string).
-            query_text = state.get("normalized_text", "") or state.get("raw_transcript", "") or ""
-            for r in rag_meta:
-                kws = (r.get("metadata") or {}).get("llm_keywords", "")
-                dist = r.get("distance") if r.get("distance") is not None else 1.0
-                hybrid, matched = _hybrid_score(dist, query_text, kws)
-                r["_hybrid"] = hybrid
-                r["_matched_kw"] = matched
+    # 거절 패턴 — RAG 없이 generic 안내. query_refine 이 일관되게
+    # "사용자가 ... 거절함" 으로 재작성하므로 string 매칭으로 충분.
+    if "거절함" in query:
+        print("[faq_branch] 거절 패턴 감지 → polite decline")
+        return {"response_text": _POLITE_DECLINE_FALLBACK}
 
-            # hybrid score 오름차순 정렬 → 상위 RAG_RERANK_TOP_N 추출
-            rag_meta.sort(key=lambda r: r.get("_hybrid", 1.0))
-            top_n = rag_meta[:RAG_RERANK_TOP_N]
+    # 1. 임베딩
+    embedder = get_embedder()
+    embedding = await embedder.embed(query)
 
-            # distance threshold 는 원본 distance 기준 filter (hybrid 가 아닌)
-            rag_results = [
-                r["document"] for r in top_n
-                if r.get("document")
-                and (r["distance"] if r.get("distance") is not None else 1.0)
-                <= RAG_DISTANCE_THRESHOLD
-            ]
-
-            if top_n:
-                summary = " | ".join(
-                    "%s@d=%.3f/h=%.3f%s%s:%r" % (
-                        _short_chunk_id(r.get("id") or ""),
-                        r.get("distance") if r.get("distance") is not None else float("nan"),
-                        r.get("_hybrid", float("nan")),
-                        ("(kw=" + "+".join(r["_matched_kw"]) + ")") if r.get("_matched_kw") else "",
-                        ""
-                        if (r.get("distance") if r.get("distance") is not None else 1.0)
-                        <= RAG_DISTANCE_THRESHOLD
-                        else "(filtered)",
-                        (r.get("document") or "")[:60],
-                    )
-                    for r in top_n
-                )
-                logger.info(
-                    "rag top_k=%d rerank=%d kept=%d threshold=%.2f bonus=%.2f call_id=%s tenant_id=%s top_n=[%s]",
-                    RAG_TOP_K, RAG_RERANK_TOP_N, len(rag_results),
-                    RAG_DISTANCE_THRESHOLD, RAG_KEYWORD_BONUS,
-                    call_id, state["tenant_id"], summary,
-                )
-        except Exception as e:
-            logger.error("rag search failed call_id=%s: %s", call_id, e)
-
-    # LLM 분기 입력용 — RAG hit 이면 0, miss 면 prev + 1.
-    # 첫 RAG miss 면 1 (모른다 + 재질문), 2+ 이면 카테고리 안내.
-    incoming_miss_count = prev_miss_count + 1 if not rag_results else 0
-    # available_categories: Commit 2 에서 call.py 가 Redis 조회 후 주입. 없으면 빈 list.
-    available_categories = state.get("available_categories") or []  # type: ignore[typeddict-item]
-
-    # Option 4 (architect Day 2~3) — 연속 RAG miss 2회+ AND tenant categories 보유 시
-    # LLM 호출 SKIP, 카테고리 안내 직접 합성. ~3초 latency 절약.
-    # response_path="clarify" 로 cache_store 자동 차단 + is_fallback=True.
-    # 후속 cycle 검토: 같은 텍스트 반복 시 escalation 트리거 또는 텍스트 다양화.
-    #
-    # 2026-04-30: 모든 카테고리 나열 → 상위 3개 + "등" 으로 단축. 한밭식당 7개 카테고리
-    # 전체 나열 시 ~90자 → 18.6초 TTS 사고 (server_114028.log Turn 2). 사용자가 끝까지
-    # 듣지 못하고 BARGE-IN 발사하는 흔적 line 102~106. preview 3개 + 등 으로 ~45자, ~9초.
-    if not rag_results and incoming_miss_count >= 2 and available_categories:
-        preview_cats = available_categories[:3]
-        cats_text = ", ".join(preview_cats)
-        suffix = " 등" if len(available_categories) > len(preview_cats) else ""
-        synth_text = (
-            f"안내드릴 수 있는 분야는 {cats_text}{suffix}이 있습니다. 어떤 정보가 필요하신가요?"
+    # 2. RAG 검색
+    results = await _rag.search_with_meta(embedding, tenant_id, top_k=_TOP_K)
+    print(f"[faq_branch] query='{query}' results={len(results)}")
+    for i, r in enumerate(results):
+        meta = r.get("metadata", {}) or {}
+        print(
+            f"  [{i+1}] distance={r.get('distance')} "
+            f"title='{meta.get('llm_title', '')}' "
+            f"is_auth={meta.get('is_auth', False)} is_vision={meta.get('is_vision', False)}"
         )
-        logger.info(
-            "rag miss synth (LLM skip) call_id=%s miss_count=%d cats=%s",
-            call_id, incoming_miss_count, cats_text + suffix,
-        )
-        return {
-            "rag_results": rag_results,
-            "response_text": synth_text,
-            "response_path": "clarify",
-            "is_timeout": False,
-            "is_fallback": True,
-            "rag_miss_count": prev_miss_count + 1,
+
+    if not results:
+        return {"response_text": _POLITE_NO_RESULT}
+
+    # 3. 메타데이터 게이트 — distance threshold 이내 청크만 검사 (false positive 방지)
+    related = [
+        r for r in results
+        if r.get("distance") is not None and r["distance"] <= _DIST_THRESHOLD
+    ]
+
+    if any((r.get("metadata") or {}).get("is_auth", False) for r in related):
+        print("[faq_branch] is_auth=True 청크 발견 (threshold 이내) → polite auth")
+        return {"response_text": _POLITE_AUTH}
+
+    # is_vision 게이트 — 별도 threshold (0.95) 로 results 전체 검사.
+    # 모델 식별 필요 query 는 일반 humanize 보다 느슨하게 잡아야 함 (모델 사양 청크가
+    # top_k 안에 들어왔다는 것 자체가 강한 신호).
+    # 매칭 검사는 user_text (raw) + rewritten_query (history 기반 추론) 둘 다.
+    rewritten = state.get("rewritten_query") or ""
+    vision_chunks = [
+        r for r in results
+        if r.get("distance") is not None
+        and r["distance"] <= _VISION_GATE_THRESHOLD
+        and (r.get("metadata") or {}).get("is_vision", False)
+    ]
+    if vision_chunks:
+        candidate_ids = {
+            (r.get("metadata") or {}).get("model_id", "")
+            for r in vision_chunks
         }
+        candidate_ids = {mid for mid in candidate_ids if mid}
+        search_text = f"{user_text} {rewritten}".upper()
+        matched = any(
+            mid and mid.upper() in search_text for mid in candidate_ids
+        )
+        if not matched:
+            print(
+                f"[faq_branch] is_vision 청크 발견 (threshold {_VISION_GATE_THRESHOLD}) "
+                f"candidates={candidate_ids} 매칭 X → polite vision"
+            )
+            return {"response_text": _POLITE_VISION}
+        print(
+            f"[faq_branch] is_vision 청크 발견 candidates={candidate_ids} "
+            f"발화/재작성에 모델 명시 → 게이트 우회"
+        )
 
-    user_message = _compose_user_message(
-        state["normalized_text"],
-        rag_results,
-        rag_miss_count=incoming_miss_count,
-        available_categories=available_categories,
+    # threshold 통과 청크가 없으면 LLM 환각 차단 — 즉시 NO_RESULT.
+    if not related:
+        print("[faq_branch] threshold 통과 청크 없음 → polite no_result")
+        return {"response_text": _POLITE_NO_RESULT}
+
+    # 4. 게이트 통과 → LLM 응답 (컨텍스트는 threshold 통과 청크만)
+    context = "\n\n".join(
+        f"[청크 {i+1}]\n{r.get('document', '')}" for i, r in enumerate(related)
     )
+    user_message = f"[검색 결과]\n{context}\n\n[사용자 질문]\n{query}"
 
-    # LLM 호출 + stall trigger race — RFC 001 v0.2 §6.5
-    # max_tokens=150 — 100자 응답 + 안전 마진 (한국어 1자 ≈ 1~2 토큰)
-    # 실측: 300 → bytes 137~191KB (17~24초 음성). 150 으로 축소해 7~10초 응답.
-    response_text, is_timeout = await _run_with_stall(
-        coro=_llm.generate(
-            system_prompt=FAQ_SYSTEM_PROMPT,
+    try:
+        text = await _llm.generate(
+            system_prompt=_FAQ_SYSTEM_PROMPT,
             user_message=user_message,
-            temperature=0.1,
-            max_tokens=150,
-        ),
-        call_id=call_id,
-        hardcut_sec=FAQ_LLM_TIMEOUT_SEC,
-        rag_results=rag_results,
-        fallback_text=FALLBACK_MESSAGE,
-    )
+            temperature=0.2,
+            max_tokens=200,
+        )
+        text = text.strip().strip('"').strip("'")
+        if not text:
+            text = _POLITE_NO_RESULT
+    except Exception as exc:
+        print(f"[faq_branch] LLM 실패 → fallback: {exc}")
+        text = _POLITE_NO_RESULT
 
-    # LLM 이 공백만 반환한 엣지 케이스도 FALLBACK 으로 보정
-    if not response_text:
-        response_text = FALLBACK_MESSAGE
-
-    # fallback 판정 — Semantic Cache 저장 차단 신호 (cache_store_node 가 검사)
-    is_fallback = (not rag_results) or (response_text == FALLBACK_MESSAGE)
-    # 다음 turn 으로 넘길 누적 카운터 — RAG miss 이거나 fallback 응답이면 +1, 정상이면 reset
-    new_miss_count = prev_miss_count + 1 if is_fallback else 0
-
-    return {
-        "rag_results": rag_results,
-        "response_text": response_text,
-        "response_path": "faq",
-        "is_timeout": is_timeout,
-        "is_fallback": is_fallback,
-        "rag_miss_count": new_miss_count,
-    }
+    print(f"[faq_branch] response='{text}'")
+    return {"response_text": text}

@@ -8,9 +8,7 @@ logger = get_logger(__name__)
 
 
 class BGEM3LocalEmbeddingService(BaseEmbeddingService):
-    """BGE-M3 로컬 추론 구현체 — 팀장(희원) 테스트용.
-    희영 연구 결과에 따라 BGEM3APIEmbeddingService 또는 이 클래스 중 선택.
-    """
+    """BGE-M3 로컬 추론 구현체 —"""
 
     def __init__(self):
         import torch

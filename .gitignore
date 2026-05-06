@@ -71,3 +71,6 @@ voice/
 tmp/
 
 .env_2
+
+# models
+models/

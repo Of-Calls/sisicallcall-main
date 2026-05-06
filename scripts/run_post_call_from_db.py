@@ -24,6 +24,11 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(override=False)
 
 from app.agents.post_call import completed_call_runner as runner_mod  # noqa: E402
+from app.agents.post_call.llm_caller import (  # noqa: E402
+    describe_post_call_llm,
+    get_post_call_llm_mode,
+    post_call_openai_key_available,
+)
 from app.services.db.transcripts import get_completed_call_context_from_db  # noqa: E402
 from app.utils.logger import get_logger  # noqa: E402
 from scripts.run_post_call_demo import (  # noqa: E402
@@ -78,6 +83,27 @@ def _patch_runner_context_lookup() -> None:
     runner_mod.get_call_context_for_post_call = _get_db_context_only  # type: ignore[assignment]
 
 
+def _reset_llm_nodes() -> None:
+    import app.agents.post_call.nodes.post_call_analysis_node as _analysis
+    import app.agents.post_call.nodes.review_node as _review
+    import app.agents.post_call.nodes.summary_node as _summary
+    import app.agents.post_call.nodes.voc_analysis_node as _voc
+    import app.agents.post_call.nodes.priority_node as _priority
+
+    _analysis._caller = None  # type: ignore[attr-defined]
+    _review._caller = None  # type: ignore[attr-defined]
+    _summary._caller = None  # type: ignore[attr-defined]
+    _voc._caller = None  # type: ignore[attr-defined]
+    _priority._caller = None  # type: ignore[attr-defined]
+
+
+def _apply_llm_mode(llm_mode: str | None) -> str:
+    if llm_mode is not None:
+        os.environ["POST_CALL_LLM_MODE"] = llm_mode
+        os.environ["POST_CALL_USE_REAL_LLM"] = "true" if llm_mode == "real" else "false"
+    return get_post_call_llm_mode()
+
+
 def _print_clean_summary(result: dict) -> None:
     executed = result.get("executed_actions") or []
     success_cnt = sum(1 for action in executed if action.get("status") == "success")
@@ -106,6 +132,7 @@ async def _run(
     trigger: str,
     real_actions: bool,
     only_tool: str | None,
+    llm_mode: str | None,
 ) -> None:
     print("\nPost-call DB runner")
     print(f"  call_id   : {call_id}")
@@ -116,9 +143,24 @@ async def _run(
     connector_modes = _apply_connector_modes(real_actions, only_tool)
     _print_connector_modes(connector_modes)
 
-    use_real_llm = os.environ.get("POST_CALL_USE_REAL_LLM", "").lower() == "true"
-    if use_real_llm:
-        print(f"\n  LLM       : {_c(_GREEN, 'real LLM (POST_CALL_USE_REAL_LLM=true)')}")
+    if real_actions:
+        print(
+            f"\n  {_c(_YELLOW, 'Real actions enabled.')} "
+            f"Make sure tenant integrations are connected."
+        )
+        print(
+            f"  Run: python scripts/check_post_call_integrations.py "
+            f"--tenant-id {tenant_id} --show-actions"
+        )
+
+    effective_llm_mode = _apply_llm_mode(llm_mode)
+    if effective_llm_mode == "real":
+        print(f"\n  LLM       : {_c(_GREEN, describe_post_call_llm())}")
+        if not post_call_openai_key_available():
+            print(
+                f"  LLM warn  : {_c(_YELLOW, 'OPENAI_API_KEY is missing; real LLM will fall back to mock')}"
+            )
+        _reset_llm_nodes()
     else:
         print(f"\n  LLM       : {_c(_YELLOW, 'Demo Mock LLM')}")
         _patch_llm_nodes()
@@ -164,6 +206,12 @@ def main() -> None:
         metavar="TOOL",
         help="With --real-actions, only this tool follows its real-mode env setting.",
     )
+    parser.add_argument(
+        "--llm-mode",
+        choices=["mock", "real"],
+        default=None,
+        help="Override POST_CALL_LLM_MODE for this run. Default: env value, then mock.",
+    )
     args = parser.parse_args()
 
     if args.only_tool and not args.real_actions:
@@ -176,6 +224,7 @@ def main() -> None:
             trigger=args.trigger,
             real_actions=args.real_actions,
             only_tool=args.only_tool,
+            llm_mode=args.llm_mode,
         )
     )
 

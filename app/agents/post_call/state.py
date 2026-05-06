@@ -25,3 +25,6 @@ class PostCallAgentState(TypedDict):
     review_retry_count: int             # 재분석 횟수 (최대 1회)
     human_review_required: bool         # True이면 외부 action 금지
     blocked_actions: list[str]          # review가 차단한 action_type 또는 tool 이름
+    # ── LLM token usage 메타데이터 (real LLM 호출 시 채워짐) ──────────────────
+    analysis_llm_usage: Optional[dict]  # {purpose, model, prompt/completion/total_tokens, source, fallback}
+    review_llm_usage: Optional[dict]

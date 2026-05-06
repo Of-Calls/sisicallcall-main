@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse
 
 from app.schemas.auth import (
     AuthInitiateRequest,
@@ -18,6 +20,10 @@ from app.services.auth.session import AuthSessionService
 from app.services.sms import get_sms_service
 from app.utils.config import settings
 from app.utils.logger import get_logger
+
+_AUTH_PAGE_HTML = (
+    Path(__file__).parent.parent.parent / "static" / "auth_face.html"
+).read_text(encoding="utf-8")
 
 logger = get_logger(__name__)
 
@@ -174,3 +180,14 @@ async def register_face(
         customer_ref=customer_ref,
         registered_at=datetime.now(timezone.utc).isoformat(),
     )
+
+
+@router.get("/{auth_id}", response_class=HTMLResponse)
+async def auth_page(auth_id: str) -> HTMLResponse:
+    """SMS 링크에서 진입하는 얼굴 인증 페이지.
+
+    HTML 안 JS 가 /auth/{auth_id}/liveness, /face, /status 를 직접 호출.
+    더 구체적인 라우트들(/liveness, /face, /status, /register, /verify)이
+    위에 먼저 선언돼 있으므로 catch-all 처럼 동작해도 충돌 없음.
+    """
+    return HTMLResponse(content=_AUTH_PAGE_HTML)

@@ -185,7 +185,8 @@ async def test_full_context_returned(monkeypatch):
     assert result["metadata"]["call_id"] == _CALL_UUID
     assert result["metadata"]["tenant_id"] == _TENANT_ID
     assert result["metadata"]["status"] == "completed"
-    assert result["metadata"]["customer_phone"] == "+821012345678"
+    # caller_number(+82-prefixed E.164) → normalize_korean_phone 거쳐 로컬 형식으로
+    assert result["metadata"]["customer_phone"] == "01012345678"
     assert result["metadata"]["start_time"] == _TS1.isoformat()
     assert result["metadata"]["end_time"] == _TS2.isoformat()
 
@@ -342,3 +343,72 @@ async def test_conn_always_closed_on_row_not_found(monkeypatch):
 
     await get_completed_call_context_from_db(_CALL_UUID)
     assert conn.closed is True
+
+
+# ── caller_number → customer_phone 매핑 ──────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_caller_number",
+    [
+        "+82-10-1234-5678",
+        "+821012345678",
+        "010-1234-5678",
+        "01012345678",
+    ],
+)
+async def test_caller_number_normalized_to_local_customer_phone(monkeypatch, raw_caller_number):
+    """caller_number 4가지 표기가 모두 '01012345678' 로 정규화되어 metadata.customer_phone 에 들어간다."""
+    conn = FakeConn(
+        fetchrow_return=_make_call_row(caller_number=raw_caller_number),
+        fetch_return=[],
+    )
+    monkeypatch.setattr(
+        "app.services.db.transcripts.asyncpg.connect",
+        AsyncMock(return_value=conn),
+    )
+
+    result = await get_completed_call_context_from_db(_CALL_UUID)
+
+    assert result is not None
+    assert result["metadata"]["customer_phone"] == "01012345678"
+
+
+@pytest.mark.asyncio
+async def test_caller_number_null_drops_customer_phone_key(monkeypatch):
+    """caller_number 가 NULL 이면 metadata 에 customer_phone 키 자체가 없다.
+
+    (action_planner_node 가 metadata.get('customer_phone', '') 로 안전하게
+    빈 문자열을 받기 위함.)
+    """
+    conn = FakeConn(
+        fetchrow_return=_make_call_row(caller_number=None),
+        fetch_return=[],
+    )
+    monkeypatch.setattr(
+        "app.services.db.transcripts.asyncpg.connect",
+        AsyncMock(return_value=conn),
+    )
+
+    result = await get_completed_call_context_from_db(_CALL_UUID)
+
+    assert result is not None
+    assert "customer_phone" not in result["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_caller_number_empty_string_drops_customer_phone_key(monkeypatch):
+    """caller_number 가 '' 빈 문자열이어도 customer_phone 키가 비워진다."""
+    conn = FakeConn(
+        fetchrow_return=_make_call_row(caller_number=""),
+        fetch_return=[],
+    )
+    monkeypatch.setattr(
+        "app.services.db.transcripts.asyncpg.connect",
+        AsyncMock(return_value=conn),
+    )
+
+    result = await get_completed_call_context_from_db(_CALL_UUID)
+
+    assert result is not None
+    assert "customer_phone" not in result["metadata"]

@@ -191,7 +191,13 @@ class ReviewIssue(BaseModel):
 class ReviewResult(BaseModel):
     verdict: str = "fail"
     confidence: float = 0.0
+    confidence_missing: bool = False
+    confidence_parse_error: bool = False
+    confidence_source: str = "llm"
+    llm_fallback: bool = False
+    llm_fallback_reason: str = ""
     issues: list[ReviewIssue] = Field(default_factory=list)
     corrections: dict[str, Any] = Field(default_factory=dict)
+    corrected_keys: list[str] = Field(default_factory=list)
     blocked_actions: list[str] = Field(default_factory=list)
     reason: str = ""
