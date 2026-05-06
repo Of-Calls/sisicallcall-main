@@ -21,7 +21,8 @@ from app.repositories import (
     save_summary, get_summary_by_call_id,
     seed_call_context, get_call_context,
     save_voc_analysis, get_voc_by_call_id,
-    save_action_logs, find_successful_action, get_action_logs_by_call_id, get_action_logs,
+    save_action_logs, find_successful_action, get_action_logs_by_call_id,
+    get_action_logs_by_call_id_for_tenant, get_action_logs,
     upsert_dashboard_payload, get_dashboard_payload,
     get_post_call_detail, get_dashboard_overview,
     get_emotion_distribution, get_priority_queue,
@@ -159,6 +160,26 @@ async def test_save_and_get_action_logs():
 
 
 # ── 4. save_action_logs 재저장 시 기존 logs 보존 + append ───────────────────
+
+@pytest.mark.asyncio
+async def test_get_action_logs_by_call_id_for_tenant_filters_file_store():
+    action = {
+        "action_type": "send_manager_email",
+        "tool": "gmail",
+        "status": "success",
+        "external_id": None,
+        "error": None,
+        "result": {},
+        "params": {},
+    }
+    await save_action_logs("call-tenant-filter", "tenant-a", [action])
+    await save_action_logs("call-tenant-filter", "tenant-b", [action])
+
+    logs = await get_action_logs_by_call_id_for_tenant("call-tenant-filter", "tenant-a")
+
+    assert len(logs) == 1
+    assert logs[0]["tenant_id"] == "tenant-a"
+
 
 @pytest.mark.asyncio
 async def test_save_action_logs_appends_without_replacing():

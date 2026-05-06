@@ -26,6 +26,7 @@ from app.repositories.mcp_action_log_repo import (
     save_action_logs,
     find_successful_action,
     get_action_logs_by_call_id,
+    get_action_logs_by_call_id_for_tenant,
     get_action_logs,
 )
 from app.repositories.dashboard_repo import (
@@ -71,6 +72,7 @@ __all__ = [
     "save_action_logs",
     "find_successful_action",
     "get_action_logs_by_call_id",
+    "get_action_logs_by_call_id_for_tenant",
     "get_action_logs",
     # dashboard
     "upsert_dashboard_payload",

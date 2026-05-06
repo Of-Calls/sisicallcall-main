@@ -19,6 +19,7 @@ from typing import Optional
 
 import asyncpg
 
+from app.repositories.rag_document_repo import upsert_rag_document_chunks_for_tenant
 from app.services.embedding.base import BaseEmbeddingService
 from app.services.llm.base import BaseLLMService
 from app.services.llm.gpt4o_mini import GPT4OMiniService
@@ -661,6 +662,7 @@ class PDFProcessor:
 
             # 5. ChromaDB upsert
             collection_name = self._rag._collection_name(tenant_id)
+            db_chunks: list[dict] = []
             for i, (chunk, embedding, llm_meta) in enumerate(
                 zip(chunks_obj, embeddings, llm_metas)
             ):
@@ -695,8 +697,39 @@ class PDFProcessor:
                         "doc_type": doc_type,
                     },
                 )
+                db_chunks.append({
+                    "chunk_index": i,
+                    "page_number": int(chunk.page),
+                    "content": chunk.text,
+                    "metadata": {
+                        "tenant_id": tenant_id,
+                        "document_id": str(document_id),
+                        "file_name": file_name,
+                        "chunk_index": i,
+                        "industry": industry,
+                        "chunk_type": chunk.chunk_type,
+                        "page_number": int(chunk.page),
+                        "bbox": bbox_str,
+                        "heading_path": " > ".join(chunk.heading_path),
+                        "llm_title": title[:100],
+                        "llm_summary": llm_meta.get("summary", ""),
+                        "llm_keywords": keywords_str,
+                        "llm_topic": llm_meta.get("topic", "湲고?"),
+                        "is_auth": False,
+                        "is_vision": False,
+                        "doc_type": doc_type,
+                    },
+                    "embedding_status": "ready",
+                    "chroma_id": f"{document_id}_chunk_{i}",
+                })
 
             # 6. tenant 가용 카테고리 (Redis) — 부가 산출물. 실패해도 인덱싱은 성공.
+            await upsert_rag_document_chunks_for_tenant(
+                document_id=str(document_id),
+                tenant_id=tenant_id,
+                chunks=db_chunks,
+            )
+
             topics = [m.get("topic", "") for m in llm_metas]
             refined_categories = await _refine_categories(topics, self._llm)
             if refined_categories:
@@ -782,7 +815,10 @@ class PDFProcessor:
             row = await conn.fetchrow(
                 """
                 SELECT id FROM rag_documents
-                WHERE tenant_id = $1::uuid AND file_name = $2 AND status != 'failed'
+                WHERE tenant_id = $1::uuid
+                  AND file_name = $2
+                  AND status != 'failed'
+                  AND deleted_at IS NULL
                 ORDER BY uploaded_at DESC LIMIT 1
                 """,
                 tenant_id, file_name,
@@ -794,6 +830,10 @@ class PDFProcessor:
     async def _delete_rag_document(self, document_id: uuid.UUID) -> None:
         conn = await asyncpg.connect(settings.database_url)
         try:
+            await conn.execute(
+                "DELETE FROM rag_document_chunks WHERE document_id = $1",
+                document_id,
+            )
             await conn.execute(
                 "DELETE FROM rag_documents WHERE id = $1", document_id,
             )

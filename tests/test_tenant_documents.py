@@ -16,6 +16,7 @@ USER_ID = "11111111-1111-1111-1111-111111111111"
 TENANT_ID = "22222222-2222-2222-2222-222222222222"
 OTHER_TENANT_ID = "33333333-3333-3333-3333-333333333333"
 DOCUMENT_ID = "44444444-4444-4444-4444-444444444444"
+CHUNK_ID = "55555555-5555-5555-5555-555555555555"
 EMAIL = "admin@example.test"
 
 
@@ -84,6 +85,22 @@ def _document_payload(
         "chroma_collection": f"tenant_{tenant_id.replace('-', '')}_docs",
         "uploaded_at": "2026-05-06T01:00:00+00:00",
         "indexed_at": "2026-05-06T01:01:00+00:00",
+    }
+
+
+def _chunk_payload() -> dict:
+    return {
+        "id": CHUNK_ID,
+        "document_id": DOCUMENT_ID,
+        "tenant_id": TENANT_ID,
+        "chunk_index": 0,
+        "page": 1,
+        "content": "original chunk content",
+        "metadata": {"page_number": 1, "chunk_type": "section"},
+        "embedding_status": "ready",
+        "chroma_id": f"{DOCUMENT_ID}_chunk_0",
+        "created_at": "2026-05-06T01:00:00+00:00",
+        "updated_at": "2026-05-06T01:01:00+00:00",
     }
 
 
@@ -159,6 +176,112 @@ def test_get_document_returns_tenant_scoped_document(monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["data"]["tenant_id"] == TENANT_ID
+
+
+def test_list_document_chunks_returns_chunk_content(monkeypatch):
+    _patch_admin_lookup(monkeypatch)
+    captured: list[dict] = []
+
+    async def fake_get_rag_document_for_tenant(document_id: str, tenant_id: str):
+        assert document_id == DOCUMENT_ID
+        assert tenant_id == TENANT_ID
+        return _document_payload()
+
+    async def fake_list_rag_document_chunks_for_tenant(
+        document_id: str,
+        tenant_id: str,
+        *,
+        offset: int = 0,
+        limit: int = 500,
+    ):
+        captured.append({
+            "document_id": document_id,
+            "tenant_id": tenant_id,
+            "offset": offset,
+            "limit": limit,
+        })
+        return {"items": [_chunk_payload()], "total": 1, "offset": offset, "limit": limit}
+
+    monkeypatch.setattr(tenant, "get_rag_document_for_tenant", fake_get_rag_document_for_tenant)
+    monkeypatch.setattr(
+        tenant,
+        "list_rag_document_chunks_for_tenant",
+        fake_list_rag_document_chunks_for_tenant,
+    )
+
+    resp = _client().get(
+        f"/tenant/{TENANT_ID}/documents/{DOCUMENT_ID}/chunks?offset=0&limit=10",
+        headers=_auth_headers(),
+    )
+
+    assert resp.status_code == 200
+    assert captured == [{"document_id": DOCUMENT_ID, "tenant_id": TENANT_ID, "offset": 0, "limit": 10}]
+    assert resp.json()["data"]["items"][0]["content"] == "original chunk content"
+
+
+def test_update_document_chunk_marks_chunk_processing(monkeypatch):
+    _patch_admin_lookup(monkeypatch)
+    captured: list[dict] = []
+
+    async def fake_get_rag_document_for_tenant(document_id: str, tenant_id: str):
+        return _document_payload(document_id=document_id, tenant_id=tenant_id)
+
+    async def fake_update_rag_document_chunk_for_tenant(**kwargs):
+        captured.append(kwargs)
+        return {
+            **_chunk_payload(),
+            "content": kwargs["content"],
+            "metadata": {"page_number": 1, "reviewed": True},
+            "embedding_status": "processing",
+        }
+
+    monkeypatch.setattr(tenant, "get_rag_document_for_tenant", fake_get_rag_document_for_tenant)
+    monkeypatch.setattr(
+        tenant,
+        "update_rag_document_chunk_for_tenant",
+        fake_update_rag_document_chunk_for_tenant,
+    )
+
+    resp = _client().patch(
+        f"/tenant/{TENANT_ID}/documents/{DOCUMENT_ID}/chunks/{CHUNK_ID}",
+        headers=_auth_headers(),
+        json={"content": "edited chunk content", "metadata": {"reviewed": True}},
+    )
+
+    assert resp.status_code == 200
+    assert captured[0]["chunk_id"] == CHUNK_ID
+    assert captured[0]["tenant_id"] == TENANT_ID
+    assert resp.json()["data"]["content"] == "edited chunk content"
+    assert resp.json()["data"]["embedding_status"] == "processing"
+
+
+def test_reindex_document_returns_ready_status(monkeypatch):
+    _patch_admin_lookup(monkeypatch)
+    calls: list[tuple[str, str]] = []
+
+    async def fake_reindex_document_chunks(document_id: str, tenant_id: str):
+        calls.append((document_id, tenant_id))
+        return 1
+
+    async def fake_get_rag_document_for_tenant(document_id: str, tenant_id: str):
+        return {
+            **_document_payload(document_id=document_id, tenant_id=tenant_id),
+            "chunk_count": 1,
+            "indexed_at": "2026-05-06T02:00:00+00:00",
+        }
+
+    monkeypatch.setattr(tenant, "_reindex_document_chunks", fake_reindex_document_chunks)
+    monkeypatch.setattr(tenant, "get_rag_document_for_tenant", fake_get_rag_document_for_tenant)
+
+    resp = _client().post(
+        f"/tenant/{TENANT_ID}/documents/{DOCUMENT_ID}/reindex",
+        headers=_auth_headers(),
+    )
+
+    assert resp.status_code == 200
+    assert calls == [(DOCUMENT_ID, TENANT_ID)]
+    assert resp.json()["data"]["status"] == "ready"
+    assert resp.json()["data"]["chunk_count"] == 1
 
 
 def test_upload_document_rejects_non_pdf(monkeypatch):
@@ -286,6 +409,37 @@ def _rag_row() -> FakeRow:
     )
 
 
+def _chunk_row() -> FakeRow:
+    now = datetime(2026, 5, 6, 1, 0, tzinfo=timezone.utc)
+    return FakeRow(
+        {
+            "id": CHUNK_ID,
+            "document_id": DOCUMENT_ID,
+            "tenant_id": TENANT_ID,
+            "chunk_index": 0,
+            "page_number": 1,
+            "content": "original chunk content",
+            "metadata": {"page_number": 1},
+            "embedding_status": "ready",
+            "chroma_id": f"{DOCUMENT_ID}_chunk_0",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+
+class ChunkFakeConn(FakeConn):
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "COUNT" in query:
+            return FakeRow({"total": 1})
+        return _chunk_row()
+
+    async def fetch(self, query, *args):
+        self.fetch_calls.append((query, args))
+        return [_chunk_row()]
+
+
 @pytest.mark.asyncio
 async def test_list_rag_documents_sql_uses_tenant_deleted_and_status(monkeypatch):
     conn = FakeConn()
@@ -354,3 +508,65 @@ async def test_soft_delete_rag_document_sql_sets_deleted_at(monkeypatch):
     assert "deleted_at IS NULL" in sql
     assert args == (DOCUMENT_ID, TENANT_ID)
     assert deleted is True
+
+
+@pytest.mark.asyncio
+async def test_list_rag_document_chunks_sql_uses_document_tenant_and_deleted(monkeypatch):
+    conn = ChunkFakeConn()
+
+    async def fake_connect(url):
+        return conn
+
+    monkeypatch.setattr(rag_document_repo.asyncpg, "connect", fake_connect)
+
+    result = await rag_document_repo.list_rag_document_chunks_for_tenant(
+        DOCUMENT_ID,
+        TENANT_ID,
+        offset=4,
+        limit=8,
+    )
+
+    count_sql, count_args = conn.fetchrow_calls[0]
+    list_sql, list_args = conn.fetch_calls[0]
+    assert "JOIN rag_documents d" in count_sql
+    assert "c.document_id = $1::uuid" in list_sql
+    assert "c.tenant_id = $2::uuid" in list_sql
+    assert "c.deleted_at IS NULL" in list_sql
+    assert "d.deleted_at IS NULL" in list_sql
+    assert "ORDER BY c.chunk_index ASC" in list_sql
+    assert count_args == (DOCUMENT_ID, TENANT_ID)
+    assert list_args == (DOCUMENT_ID, TENANT_ID, 4, 8)
+    assert result["items"][0]["id"] == CHUNK_ID
+    assert result["items"][0]["content"] == "original chunk content"
+
+
+@pytest.mark.asyncio
+async def test_update_rag_document_chunk_sql_uses_tenant_and_marks_processing(monkeypatch):
+    conn = ChunkFakeConn()
+
+    async def fake_connect(url):
+        return conn
+
+    monkeypatch.setattr(rag_document_repo.asyncpg, "connect", fake_connect)
+
+    result = await rag_document_repo.update_rag_document_chunk_for_tenant(
+        chunk_id=CHUNK_ID,
+        document_id=DOCUMENT_ID,
+        tenant_id=TENANT_ID,
+        content="edited chunk",
+        metadata={"reviewed": True},
+    )
+
+    update_sql, update_args = conn.fetchrow_calls[0]
+    doc_sql, doc_args = conn.execute_calls[0]
+    assert "UPDATE rag_document_chunks c" in update_sql
+    assert "c.id = $1::uuid" in update_sql
+    assert "c.document_id = $2::uuid" in update_sql
+    assert "c.tenant_id = $3::uuid" in update_sql
+    assert "embedding_status = 'processing'" in update_sql
+    assert update_args[:4] == (CHUNK_ID, DOCUMENT_ID, TENANT_ID, "edited chunk")
+    assert "UPDATE rag_documents" in doc_sql
+    assert "status = 'processing'" in doc_sql
+    assert doc_args == (DOCUMENT_ID, TENANT_ID)
+    assert result is not None
+    assert result["id"] == CHUNK_ID

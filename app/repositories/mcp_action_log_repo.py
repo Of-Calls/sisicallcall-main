@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,7 +19,7 @@ logger = get_logger(__name__)
 _DEFAULT_STORE_PATH = Path(".local/mcp_action_logs.json")
 _action_store: dict[str, list[dict]] = {}   # call_id → [log_entry, ...]
 
-_VALID_STATUSES = frozenset({"success", "failed", "skipped", "pending"})
+_VALID_STATUSES = frozenset({"success", "failed", "fail", "skipped", "pending"})
 _STORE_MODE_FILE = "file"
 _STORE_MODE_DB = "db"
 
@@ -93,19 +94,27 @@ def _iso(value) -> str:
     return str(value or "")
 
 
+def _row_get(row, key: str, default=None):
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
 def _row_to_log_entry(row) -> dict:
     return {
-        "call_id": str(row["call_id"]),
-        "tenant_id": row["tenant_id"] or "",
-        "action_type": row["action_type"] or "",
-        "tool_name": row["tool_name"] or "",
-        "request_payload": _json_payload(row["request_payload"]),
-        "response_payload": _json_payload(row["response_payload"]),
-        "status": row["status"] or "pending",
-        "external_id": row["external_id"],
-        "error_message": row["error_message"],
-        "created_at": _iso(row["created_at"]),
-        "updated_at": _iso(row["updated_at"]),
+        "id": str(_row_get(row, "id") or ""),
+        "call_id": str(_row_get(row, "call_id") or ""),
+        "tenant_id": _row_get(row, "tenant_id") or "",
+        "action_type": _row_get(row, "action_type") or "",
+        "tool_name": _row_get(row, "tool_name") or "",
+        "request_payload": _json_payload(_row_get(row, "request_payload")),
+        "response_payload": _json_payload(_row_get(row, "response_payload")),
+        "status": _row_get(row, "status") or "pending",
+        "external_id": _row_get(row, "external_id"),
+        "error_message": _row_get(row, "error_message"),
+        "created_at": _iso(_row_get(row, "created_at")),
+        "updated_at": _iso(_row_get(row, "updated_at")),
     }
 
 
@@ -164,6 +173,7 @@ def _to_log_entry(action: dict, *, call_id: str, tenant_id: str, now: datetime) 
     if status not in _VALID_STATUSES:
         status = "pending"
     return {
+        "id": str(uuid.uuid4()),
         "call_id": call_id,
         "tenant_id": tenant_id,
         "action_type": action.get("action_type", ""),
@@ -179,6 +189,21 @@ def _to_log_entry(action: dict, *, call_id: str, tenant_id: str, now: datetime) 
 
 
 # ── Module-level functions (KDT-77 interface) ─────────────────────────────────
+
+def _with_log_id(entry: dict) -> dict:
+    out = copy.deepcopy(entry)
+    if not out.get("id"):
+        key = ":".join([
+            "mcp-action",
+            str(out.get("call_id") or ""),
+            str(out.get("tenant_id") or ""),
+            str(out.get("action_type") or ""),
+            str(out.get("tool_name") or ""),
+            str(out.get("created_at") or ""),
+        ])
+        out["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+    return out
+
 
 async def save_action_logs(
     call_id: str,
@@ -291,7 +316,7 @@ async def _find_successful_action_from_db(
         conn = await asyncpg.connect(_database_url())
         row = await conn.fetchrow(
             """
-            SELECT call_id, tenant_id, action_type, tool_name,
+            SELECT id, call_id, tenant_id, action_type, tool_name,
                    request_payload, response_payload, status,
                    external_id, error_message, created_at, updated_at
             FROM mcp_action_logs
@@ -327,7 +352,24 @@ async def get_action_logs_by_call_id(call_id: str) -> list[dict]:
 
     _load_into_memory()
     entries = _action_store.get(call_id, [])
-    return copy.deepcopy(entries)
+    return [_with_log_id(entry) for entry in entries]
+
+
+async def get_action_logs_by_call_id_for_tenant(
+    call_id: str,
+    tenant_id: str,
+) -> list[dict]:
+    if _get_store_mode() == _STORE_MODE_DB:
+        return await _get_action_logs_by_call_id_for_tenant_from_db(call_id, tenant_id)
+
+    _load_into_memory()
+    entries = _action_store.get(call_id, [])
+    normalized_tenant_id = str(tenant_id).lower()
+    return [
+        _with_log_id(entry)
+        for entry in entries
+        if str(entry.get("tenant_id") or "").lower() == normalized_tenant_id
+    ]
 
 
 async def _get_action_logs_by_call_id_from_db(call_id: str) -> list[dict]:
@@ -336,7 +378,7 @@ async def _get_action_logs_by_call_id_from_db(call_id: str) -> list[dict]:
         conn = await asyncpg.connect(_database_url())
         rows = await conn.fetch(
             """
-            SELECT call_id, tenant_id, action_type, tool_name,
+            SELECT id, call_id, tenant_id, action_type, tool_name,
                    request_payload, response_payload, status,
                    external_id, error_message, created_at, updated_at
             FROM mcp_action_logs
@@ -348,6 +390,40 @@ async def _get_action_logs_by_call_id_from_db(call_id: str) -> list[dict]:
         return [_row_to_log_entry(row) for row in rows]
     except Exception as exc:
         logger.warning("action_logs db list failed call_id=%s err=%s", call_id, exc)
+        return []
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+async def _get_action_logs_by_call_id_for_tenant_from_db(
+    call_id: str,
+    tenant_id: str,
+) -> list[dict]:
+    conn = None
+    try:
+        conn = await asyncpg.connect(_database_url())
+        rows = await conn.fetch(
+            """
+            SELECT id, call_id, tenant_id, action_type, tool_name,
+                   request_payload, response_payload, status,
+                   external_id, error_message, created_at, updated_at
+            FROM mcp_action_logs
+            WHERE call_id = $1
+              AND lower(COALESCE(tenant_id, '')) = lower($2)
+            ORDER BY created_at ASC
+            """,
+            call_id,
+            tenant_id,
+        )
+        return [_row_to_log_entry(row) for row in rows]
+    except Exception as exc:
+        logger.warning(
+            "action_logs db tenant list failed call_id=%s tenant_id=%s err=%s",
+            call_id,
+            tenant_id,
+            exc,
+        )
         return []
     finally:
         if conn is not None:
@@ -400,7 +476,7 @@ async def _get_action_logs_from_db(
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"""
-        SELECT call_id, tenant_id, action_type, tool_name,
+        SELECT id, call_id, tenant_id, action_type, tool_name,
                request_payload, response_payload, status,
                external_id, error_message, created_at, updated_at
         FROM mcp_action_logs

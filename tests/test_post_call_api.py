@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import app.api.v1.post_call as post_call_api
 import app.repositories.call_summary_repo as summary_mod
 import app.repositories.voc_analysis_repo as voc_mod
 import app.repositories.mcp_action_log_repo as action_mod
@@ -119,9 +120,12 @@ def _seed_call_context(call_id: str, tenant_id: str = "default") -> None:
 
 def _seed_action_logs(call_id: str, tenant_id: str, actions: list[dict]) -> None:
     from datetime import datetime, timezone
+    from uuid import uuid4
+
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     action_mod._action_store[call_id] = [
         {
+            "id": str(uuid4()),
             "call_id": call_id,
             "tenant_id": tenant_id,
             "action_type": a.get("action_type", ""),
@@ -136,6 +140,20 @@ def _seed_action_logs(call_id: str, tenant_id: str, actions: list[dict]) -> None
         }
         for a in actions
     ]
+
+
+def _patch_call_lookup(monkeypatch, *, exists: bool = True, tenant_id: str = "tenant-a") -> None:
+    async def fake_get_call_by_id_for_tenant(call_id: str, jwt_tenant_id: str):
+        assert jwt_tenant_id == tenant_id
+        if not exists:
+            return None
+        return {"id": call_id, "tenant_id": jwt_tenant_id}
+
+    monkeypatch.setattr(
+        post_call_api,
+        "get_call_by_id_for_tenant",
+        fake_get_call_by_id_for_tenant,
+    )
 
 
 # ── 1. GET /post-call/{call_id} 성공 ─────────────────────────────────────────
@@ -168,27 +186,55 @@ def test_get_post_call_not_found():
 
 # ── 3. GET /post-call/{call_id}/actions 성공 ──────────────────────────────────
 
-def test_get_call_actions_success():
-    _seed_action_logs(
-        PAYLOAD_ANGRY_CRITICAL["call_id"],
-        PAYLOAD_ANGRY_CRITICAL["tenant_id"],
-        PAYLOAD_ANGRY_CRITICAL["executed_actions"],
-    )
+def test_get_call_actions_success(monkeypatch):
+    _patch_call_lookup(monkeypatch)
+    call_id = PAYLOAD_ANGRY_CRITICAL["call_id"]
+    _seed_action_logs(call_id, PAYLOAD_ANGRY_CRITICAL["tenant_id"], [
+        {
+            "action_type": "send_manager_email",
+            "tool": "gmail",
+            "params": {"to": "manager@example.com"},
+            "result": {"sent": True},
+            "status": "success",
+        },
+        {
+            "action_type": "schedule_callback",
+            "tool": "calendar",
+            "params": {"title": "callback"},
+            "result": {},
+            "status": "failed",
+            "error": "calendar unavailable",
+        },
+    ])
 
-    resp = _client.get(f"/post-call/{PAYLOAD_ANGRY_CRITICAL['call_id']}/actions")
+    resp = _client.get(f"/post-call/{call_id}/actions")
     assert resp.status_code == 200
 
     data = resp.json()
-    assert data["call_id"] == PAYLOAD_ANGRY_CRITICAL["call_id"]
-    assert "actions" in data
-    assert len(data["actions"]) == len(PAYLOAD_ANGRY_CRITICAL["executed_actions"])
-    assert data["actions"][0]["action_type"] == "create_voc_issue"
+    assert data["total"] == 2
+    assert data["items"][0]["call_id"] == call_id
+    assert data["items"][0]["tenant_id"] == PAYLOAD_ANGRY_CRITICAL["tenant_id"]
+    assert data["items"][0]["action_type"] == "send_manager_email"
+    assert data["items"][0]["action_detail"] == "gmail"
+    assert data["items"][0]["status"] == "success"
+    assert data["items"][1]["status"] == "fail"
+    assert data["items"][1]["error_message"] == "calendar unavailable"
 
 
-def test_get_call_actions_empty_for_unknown_call():
+def test_get_call_actions_empty_for_call_with_no_actions(monkeypatch):
+    _patch_call_lookup(monkeypatch)
+
     resp = _client.get("/post-call/no-actions-call/actions")
     assert resp.status_code == 200
-    assert resp.json()["actions"] == []
+    assert resp.json() == {"items": [], "total": 0}
+
+
+def test_get_call_actions_other_tenant_call_returns_404(monkeypatch):
+    _patch_call_lookup(monkeypatch, exists=False)
+
+    resp = _client.get("/post-call/call-other-tenant/actions")
+
+    assert resp.status_code == 404
 
 
 # ── 4. POST /post-call/{call_id}/run manual 실행 성공 ─────────────────────────

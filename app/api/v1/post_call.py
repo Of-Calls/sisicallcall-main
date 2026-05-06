@@ -6,17 +6,21 @@ POST-CALL API — 통화 후처리 결과 조회 및 수동 실행.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.agents.post_call.completed_call_runner import (
     _CALL_CONTEXT_NOT_FOUND,
     run_post_call_for_completed_call,
 )
+from app.api.v1.admin_auth import get_current_admin_user
 from app.repositories import (
-    get_action_logs_by_call_id,
+    get_action_logs_by_call_id_for_tenant,
     get_dashboard_payload,
     get_post_call_detail,
 )
+from app.repositories.call_repo import get_call_by_id_for_tenant
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,11 +30,60 @@ router = APIRouter()
 _VALID_TRIGGERS = frozenset({"call_ended", "manual", "escalation_immediate"})
 
 
+def _current_admin_tenant_id(current_admin: dict[str, Any]) -> str:
+    user = current_admin.get("user") or {}
+    tenant_id = str(user.get("tenant_id") or "").strip()
+    if not tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin tenant",
+        )
+    return tenant_id
+
+
+def _api_action_status(raw_status: str | None) -> str:
+    if raw_status in ("failed", "fail"):
+        return "fail"
+    return raw_status or "pending"
+
+
+def _action_log_response_item(log: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(log.get("id") or ""),
+        "call_id": str(log.get("call_id") or ""),
+        "tenant_id": str(log.get("tenant_id") or ""),
+        "action_type": str(log.get("action_type") or ""),
+        "action_detail": str(
+            log.get("action_detail")
+            or log.get("tool_name")
+            or log.get("action_type")
+            or ""
+        ),
+        "status": _api_action_status(log.get("status")),
+        "request_payload": log.get("request_payload") or {},
+        "response_payload": log.get("response_payload") or {},
+        "error_message": log.get("error_message"),
+        "executed_at": log.get("executed_at") or log.get("created_at"),
+    }
+
+
 @router.get("/{call_id}/actions")
-async def get_call_actions(call_id: str):
+async def get_call_actions(
+    call_id: str,
+    current_admin: dict[str, Any] = Depends(get_current_admin_user),
+):
     """call_id 에 해당하는 MCP action log list 를 반환한다."""
-    logs = await get_action_logs_by_call_id(call_id)
-    return {"call_id": call_id, "actions": logs}
+    tenant_id = _current_admin_tenant_id(current_admin)
+    call_record = await get_call_by_id_for_tenant(call_id, tenant_id)
+    if call_record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"call not found: {call_id!r}",
+        )
+
+    logs = await get_action_logs_by_call_id_for_tenant(call_id, tenant_id)
+    items = [_action_log_response_item(log) for log in logs]
+    return {"items": items, "total": len(items)}
 
 
 @router.get("/{call_id}")
