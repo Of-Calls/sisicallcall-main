@@ -10,9 +10,10 @@ CREATE TABLE IF NOT EXISTS admin_users (
     id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id      UUID NOT NULL REFERENCES tenants(id),
     email          VARCHAR(255) UNIQUE NOT NULL,
-    password_hash  TEXT NOT NULL,
+    password_hash  VARCHAR(255) NOT NULL,
     name           VARCHAR(100) NOT NULL,
-    role           VARCHAR(20) NOT NULL DEFAULT 'admin',
+    role           VARCHAR(20) NOT NULL DEFAULT 'owner'
+                   CHECK (role IN ('owner', 'admin', 'staff', 'manager', 'agent')),
     is_active      BOOLEAN DEFAULT TRUE,
     last_login_at  TIMESTAMPTZ,
     created_at     TIMESTAMPTZ DEFAULT now(),
@@ -20,7 +21,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
 );
 
 ALTER TABLE admin_users
-    ALTER COLUMN password_hash TYPE TEXT;
+    ALTER COLUMN password_hash TYPE VARCHAR(255);
 
 ALTER TABLE admin_users
     ADD COLUMN IF NOT EXISTS name VARCHAR(100);
@@ -44,14 +45,10 @@ ALTER TABLE admin_users
 
 UPDATE admin_users
 SET role = 'staff'
-WHERE role IN ('manager', 'agent');
-
-UPDATE admin_users
-SET role = 'staff'
-WHERE role IS NULL OR role NOT IN ('owner', 'admin', 'staff');
+WHERE role IS NULL OR role NOT IN ('owner', 'admin', 'staff', 'manager', 'agent');
 
 ALTER TABLE admin_users
-    ALTER COLUMN role SET DEFAULT 'admin',
+    ALTER COLUMN role SET DEFAULT 'owner',
     ALTER COLUMN role SET NOT NULL;
 
 ALTER TABLE admin_users
@@ -59,7 +56,7 @@ ALTER TABLE admin_users
 
 ALTER TABLE admin_users
     ADD CONSTRAINT admin_users_role_check
-    CHECK (role IN ('owner', 'admin', 'staff'));
+    CHECK (role IN ('owner', 'admin', 'staff', 'manager', 'agent'));
 
 CREATE INDEX IF NOT EXISTS idx_admin_users_tenant_id ON admin_users(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_admin_users_email ON admin_users(email);

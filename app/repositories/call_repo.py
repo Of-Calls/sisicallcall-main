@@ -171,11 +171,11 @@ async def list_calls_for_tenant(
     limit: int = 20,
 ) -> dict:
     """관리자용 tenant-scoped calls 목록 조회."""
-    if not _is_uuid(tenant_id):
-        return {"items": [], "total": 0}
-
     offset = max(int(offset or 0), 0)
     limit = min(max(int(limit or 20), 1), 100)
+
+    if not _is_uuid(tenant_id):
+        return {"items": [], "total": 0, "offset": offset, "limit": limit}
 
     where_parts = ["tenant_id = $1::uuid"]
     args: list = [tenant_id]
@@ -218,12 +218,14 @@ async def list_calls_for_tenant(
             return {
                 "items": [_call_row_to_dict(row) for row in rows],
                 "total": int(total or 0),
+                "offset": offset,
+                "limit": limit,
             }
         finally:
             await conn.close()
     except Exception as e:
         logger.warning("list_calls_for_tenant failed tenant_id=%s err=%s", tenant_id, e)
-        return {"items": [], "total": 0}
+        return {"items": [], "total": 0, "offset": offset, "limit": limit}
 
 
 async def get_call_by_id_for_tenant(call_id: str, tenant_id: str) -> dict | None:

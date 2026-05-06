@@ -7,7 +7,7 @@ from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, field_validator
 
 
-AdminRole = Literal["owner", "admin", "staff"]
+AdminRole = Literal["owner", "admin", "staff", "manager", "agent"]
 
 
 class AdminLoginRequest(BaseModel):

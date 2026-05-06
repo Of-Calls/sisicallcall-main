@@ -37,6 +37,12 @@ from app.repositories.dashboard_repo import (
     get_emotion_distribution,
     get_priority_queue,
 )
+from app.repositories.admin_user_repo import (
+    create_admin_user,
+    find_admin_user_by_email,
+    find_admin_user_by_id,
+    update_last_login,
+)
 
 __all__ = [
     # classes
@@ -73,4 +79,9 @@ __all__ = [
     "get_dashboard_overview",
     "get_emotion_distribution",
     "get_priority_queue",
+    # admin_user
+    "create_admin_user",
+    "find_admin_user_by_email",
+    "find_admin_user_by_id",
+    "update_last_login",
 ]

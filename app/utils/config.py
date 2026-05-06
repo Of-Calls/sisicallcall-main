@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     # App
     env: str = "development"
     log_level: str = "INFO"
+
+    # Admin JWT
     jwt_secret_key: str = "change-me"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
