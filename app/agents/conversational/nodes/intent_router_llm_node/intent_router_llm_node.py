@@ -58,5 +58,18 @@ async def intent_router_llm_node(state: CallState) -> dict:
     if intent not in _VALID_INTENTS:
         intent = "escalation"  # 분류 실패 시 상담원 연결
 
+    # 가드 — escalation 으로 분류됐지만 사용자 발화에 명시 키워드 ("상담원/사람과/답답"
+    # 등) 가 없으면 LLM 비결정성으로 잘못 분류된 것으로 보고 faq 로 변경.
+    # 실통화에서 LLM 이 history 영향으로 일반 FAQ 발화를 escalation 으로 라우팅하던
+    # 케이스 차단. 시연 시 "5번 시도 후 escalation" 효과 (사용자가 직접 호출 X 면 X).
+    if intent == "escalation":
+        decision_src = f"{state.get('user_text', '')} {state.get('rewritten_query', '')}"
+        explicit_kw = ("상담원", "사람과", "사람한테", "답답", "화나", "직접 연결")
+        if not any(kw in decision_src for kw in explicit_kw):
+            print(
+                f"[intent_router] escalation 분류 → 명시 키워드 없음 → faq 강제 변경"
+            )
+            intent = "faq"
+
     print(f"[intent_router] query='{query}' → intent='{intent}'")
     return {"intent": intent}

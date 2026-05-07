@@ -1,5 +1,6 @@
 import os
 
+from app.agents.conversational.prompts.fallback_phrases import get_inquiry_phrase
 from app.agents.conversational.state import CallState
 from app.services.embedding import get_embedder
 from app.services.llm.gpt4o_mini import GPT4OMiniService
@@ -19,7 +20,6 @@ _TOP_K = 3
 # faq_branch 와 동일 — ChromaDB default L2 distance (정규화 임베딩, 작을수록 유사).
 _DIST_THRESHOLD = 0.85
 
-_POLITE_NO_PHONE = "사진 안내를 위한 정보가 부족해요. 매장으로 직접 문의해주세요."
 _POLITE_SMS_FAILED = "사진 업로드 링크 발송에 문제가 생겼어요. 잠시 후 다시 시도해주세요."
 _POLITE_SMS_SENT = (
     "어떤 정수기인지 확인할 수 있도록 휴대폰으로 사진 업로드 링크를 보내드렸어요. "
@@ -28,7 +28,14 @@ _POLITE_SMS_SENT = (
 _POLITE_NOT_RECEIVED = "아직 사진이 도착하지 않았어요. 업로드 후 다시 알려주세요."
 _POLITE_ANALYZING = "사진을 분석 중이에요. 잠시만 기다려주세요."
 _POLITE_FAILED = "죄송해요, 사진 분석에 문제가 생겼어요. 상담원으로 연결해드릴게요."
-_POLITE_NO_RESULT = "해당 모델 정보를 찾기 어려워요. 매장으로 문의해주시면 자세히 안내드릴게요."
+
+
+def _polite_no_phone(industry: str) -> str:
+    return f"사진 안내를 위한 정보가 부족해요. {get_inquiry_phrase(industry)}."
+
+
+def _polite_no_result(industry: str) -> str:
+    return f"해당 모델 정보를 찾기 어려워요. {get_inquiry_phrase(industry)}."
 
 _VISION_HUMANIZE_PROMPT = """당신은 매장 전화 상담 AI 입니다.
 사용자가 사진을 보내 인식된 제품 모델과 그 모델의 설명 데이터(RAG)가 주어집니다.
@@ -64,10 +71,11 @@ async def _create_new_vision(call_id: str, tenant_id: str, customer_phone: str) 
     return {"response_text": _POLITE_SMS_SENT}
 
 
-async def _humanize_with_rag(label: str, tenant_id: str) -> str:
+async def _humanize_with_rag(label: str, tenant_id: str, tenant_industry: str = "") -> str:
     """analyzed 결과 라벨로 ChromaDB 에서 model_spec 청크 검색 → LLM humanize.
 
     where 필터: doc_type=model_spec AND model_id=label.
+    fallback (NO_RESULT) 메시지는 tenant_industry 기반.
     """
     query = f"{label} 정수기 사양"
     embedder = get_embedder()
@@ -95,7 +103,7 @@ async def _humanize_with_rag(label: str, tenant_id: str) -> str:
     ]
     if not related:
         print(f"[vision_branch] threshold 통과 청크 없음 → no_result")
-        return _POLITE_NO_RESULT
+        return _polite_no_result(tenant_industry)
 
     context = "\n\n".join(
         f"[청크 {i+1}]\n{r.get('document', '')}" for i, r in enumerate(related)
@@ -112,20 +120,21 @@ async def _humanize_with_rag(label: str, tenant_id: str) -> str:
             max_tokens=200,
         )
         text = text.strip().strip('"').strip("'")
-        return text or _POLITE_NO_RESULT
+        return text or _polite_no_result(tenant_industry)
     except Exception as exc:
         print(f"[vision_branch] LLM 실패 → fallback: {exc}")
-        return _POLITE_NO_RESULT
+        return _polite_no_result(tenant_industry)
 
 
 async def vision_branch_node(state: CallState) -> dict:
     tenant_id = state["tenant_id"]
+    tenant_industry = state.get("tenant_industry", "")
     call_id = state["call_id"]
 
     customer_phone = os.getenv("SMS_TEST_RECIPIENT", "")
     if not customer_phone:
         print("[vision_branch] SMS_TEST_RECIPIENT 미설정 → polite_no_phone")
-        return {"response_text": _POLITE_NO_PHONE}
+        return {"response_text": _polite_no_phone(tenant_industry)}
 
     existing_vision_id = await _call_session_svc.get_vision_id(call_id)
     if existing_vision_id:
@@ -142,8 +151,8 @@ async def vision_branch_node(state: CallState) -> dict:
             await _call_session_svc.clear_vision_id(call_id)
             if not label:
                 print(f"[vision_branch] analyzed 인데 label 비어있음 → no_result")
-                return {"response_text": _POLITE_NO_RESULT}
-            text = await _humanize_with_rag(label, tenant_id)
+                return {"response_text": _polite_no_result(tenant_industry)}
+            text = await _humanize_with_rag(label, tenant_id, tenant_industry)
             return {"response_text": text}
         if status == "failed":
             # 새 사이클 가능하도록 정리. 실제 escalation 라우팅은 escalation 노드 구현 시점.

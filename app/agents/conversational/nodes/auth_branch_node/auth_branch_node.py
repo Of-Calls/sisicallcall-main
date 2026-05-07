@@ -4,6 +4,7 @@ from app.agents.conversational.nodes.task_branch_node.task_branch_node import (
     ask_for_missing,
     humanize_tool_result,
 )
+from app.agents.conversational.prompts.fallback_phrases import get_inquiry_phrase
 from app.agents.conversational.state import CallState
 from app.agents.conversational.tool_catalog import get_available_actions
 from app.services.auth.session import AuthSessionService
@@ -16,7 +17,6 @@ _auth_session_svc = AuthSessionService()
 _call_session_svc = RedisSessionService()
 _sms_svc = get_sms_service()
 
-_POLITE_NO_PHONE = "본인 인증 진행을 위한 정보가 부족해요. 매장으로 직접 문의해주세요."
 _POLITE_SMS_FAILED = "인증 링크 발송에 문제가 생겼어요. 잠시 후 다시 시도해주세요."
 _POLITE_SMS_SENT = (
     "본인 인증을 위해 휴대폰으로 인증 링크를 보내드렸어요. "
@@ -25,7 +25,14 @@ _POLITE_SMS_SENT = (
 _POLITE_IN_PROGRESS = "본인 인증을 진행 중이에요. 휴대폰에서 인증을 완료해주세요."
 _POLITE_VERIFIED = "인증이 완료됐어요. 어떤 도움이 필요하신가요?"
 _POLITE_BLOCKED = "인증이 여러 번 실패해 차단됐어요. 상담원으로 연결해드릴게요."
-_POLITE_TOOL_FAILED = "처리 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나 매장으로 문의해주세요."
+
+
+def _polite_no_phone(industry: str) -> str:
+    return f"본인 인증 진행을 위한 정보가 부족해요. {get_inquiry_phrase(industry)}."
+
+
+def _polite_tool_failed(industry: str) -> str:
+    return f"처리 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나 {get_inquiry_phrase(industry)}."
 
 
 async def _create_new_auth(call_id: str, tenant_id: str, customer_phone: str) -> dict:
@@ -52,13 +59,15 @@ async def _create_new_auth(call_id: str, tenant_id: str, customer_phone: str) ->
     return {"response_text": _POLITE_SMS_SENT}
 
 
-async def _resume_pending_task(call_id: str, tenant_id: str, pending: dict) -> dict:
+async def _resume_pending_task(
+    call_id: str, tenant_id: str, tenant_industry: str, pending: dict
+) -> dict:
     """auth verified 직후 task_branch 가 저장한 pending_task 자동 재실행.
 
     spec 재조회 → required 검증:
       - missing 있으면 ask_for_missing (다음 turn 에 task 가 LLM history 기반으로 채움).
       - 완전하면 mcp_client.call_tool + humanize.
-    pending_task 는 호출 측에서 이미 clear. 실패 시 _POLITE_TOOL_FAILED.
+    pending_task 는 호출 측에서 이미 clear. 실패 시 polite_tool_failed (industry 기반).
     """
     action_type = pending.get("action_type", "")
     arguments = pending.get("arguments") or {}
@@ -89,25 +98,26 @@ async def _resume_pending_task(call_id: str, tenant_id: str, pending: dict) -> d
         )
     except Exception as exc:
         print(f"[auth_branch] mcp 호출 실패: {exc}")
-        return {"response_text": _POLITE_TOOL_FAILED}
+        return {"response_text": _polite_tool_failed(tenant_industry)}
 
     print(f"[auth_branch] mcp_result status={mcp_result.get('status')}")
     if mcp_result.get("status") != "success":
-        return {"response_text": _POLITE_TOOL_FAILED}
+        return {"response_text": _polite_tool_failed(tenant_industry)}
 
-    text = await humanize_tool_result(user_text, action_type, mcp_result)
+    text = await humanize_tool_result(user_text, action_type, mcp_result, tenant_industry)
     return {"response_text": text}
 
 
 async def auth_branch_node(state: CallState) -> dict:
     tenant_id = state["tenant_id"]
+    tenant_industry = state.get("tenant_industry", "")
     call_id = state["call_id"]
 
     # 시연용: SMS_TEST_RECIPIENT 고정. 실서비스에서는 Twilio caller ID 매핑으로 대체.
     customer_phone = os.getenv("SMS_TEST_RECIPIENT", "")
     if not customer_phone:
         print("[auth_branch] SMS_TEST_RECIPIENT 미설정 → polite_no_phone")
-        return {"response_text": _POLITE_NO_PHONE}
+        return {"response_text": _polite_no_phone(tenant_industry)}
 
     # ① 진행 중인 auth 가 있으면 status 분기 (재발송 방지)
     existing_auth_id = await _call_session_svc.get_auth_id(call_id)
@@ -125,7 +135,7 @@ async def auth_branch_node(state: CallState) -> dict:
             pending = await _call_session_svc.get_pending_task(call_id)
             if pending:
                 await _call_session_svc.clear_pending_task(call_id)
-                return await _resume_pending_task(call_id, tenant_id, pending)
+                return await _resume_pending_task(call_id, tenant_id, tenant_industry, pending)
             return {"response_text": _POLITE_VERIFIED}
         if status == "blocked":
             return {"response_text": _POLITE_BLOCKED}

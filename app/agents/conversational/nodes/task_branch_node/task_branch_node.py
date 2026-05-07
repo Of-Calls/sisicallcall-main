@@ -1,6 +1,10 @@
 import os
 from datetime import datetime
 
+from app.agents.conversational.prompts.fallback_phrases import (
+    get_contact_channel,
+    get_inquiry_phrase,
+)
 from app.agents.conversational.state import CallState
 from app.agents.conversational.tool_catalog import (
     get_available_actions,
@@ -26,15 +30,21 @@ def _today_label() -> str:
     return f"{now.strftime('%Y-%m-%d')} ({_KOREAN_WEEKDAYS[now.weekday()]})"
 
 
-_POLITE_NO_TOOLS = "이 매장은 자동 업무 처리가 지원되지 않아요. 매장으로 직접 문의해주세요."
 _POLITE_AUTH = "본인 인증이 필요한 작업이에요. 인증 진행해드릴까요?"
 _POLITE_BLOCKED = "본인 인증이 여러 번 실패해 더 이상 진행이 어려워요. 상담원으로 연결해드릴게요."
 _POLITE_MISSING_INFO = "처리에 필요한 정보를 조금 더 알려주시겠어요?"
-_POLITE_TOOL_FAILED = "처리 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나 매장으로 문의해주세요."
 _POLITE_DECLINE_BOOKING = "네, 예약은 진행하지 않을게요. 이용해주셔서 감사합니다."
 _POLITE_SMS_DECLINED = "네, 이용해주셔서 감사합니다."
 _POLITE_SMS_SENT = "확인 문자 발송해드렸어요. 이용해주셔서 감사합니다."
 _POLITE_SMS_FAILED = "확인 문자 발송에 문제가 생겼어요. 이용해주셔서 감사합니다."
+
+
+def _polite_no_tools(industry: str) -> str:
+    return f"이곳은 자동 업무 처리가 지원되지 않아요. {get_inquiry_phrase(industry)}."
+
+
+def _polite_tool_failed(industry: str) -> str:
+    return f"처리 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나 {get_inquiry_phrase(industry)}."
 
 
 def _format_schedule_complete(time_kor: str) -> str:
@@ -42,12 +52,13 @@ def _format_schedule_complete(time_kor: str) -> str:
     return f"{time_kor}에 예약이 완료되었습니다. 예약 확인 문자를 보내드릴까요?"
 
 
-def _build_sms_body(tenant_name: str, time_kor: str) -> str:
-    """예약 확정 SMS 본문 조립."""
-    name = tenant_name or "매장"
+def _build_sms_body(tenant_name: str, tenant_industry: str, time_kor: str) -> str:
+    """예약 확정 SMS 본문 조립 — industry 별 contact channel 자동."""
+    name = tenant_name or "고객센터"
+    channel = get_contact_channel(tenant_industry)
     return (
         f"[{name}] 예약 확정: {time_kor}\n"
-        f"변경이나 문의 사항이 있으시면 매장으로 연락 주세요."
+        f"변경이나 문의 사항이 있으시면 {channel} 연락 주세요."
     )
 
 
@@ -224,10 +235,16 @@ async def ask_for_missing(
         return _POLITE_MISSING_INFO
 
 
-async def humanize_tool_result(query: str, action_type: str, mcp_result: dict) -> str:
+async def humanize_tool_result(
+    query: str,
+    action_type: str,
+    mcp_result: dict,
+    tenant_industry: str = "",
+) -> str:
     """MCP 도구 결과를 음성 친화적 한두 문장으로 변환.
 
     auth_branch 자동 재실행 (D-C) 에서도 재사용되므로 module-public.
+    tenant_industry 는 fallback (humanize 실패 시 polite tool failed) 동적화 용.
 
     시간 필드 (preferred_time, scheduled_time, start_time) 가 있으면
     코드로 한국어 친화 표현 ("5월 9일 토요일 오후 7시") 미리 계산해
@@ -267,10 +284,10 @@ async def humanize_tool_result(query: str, action_type: str, mcp_result: dict) -
             temperature=0.2,
             max_tokens=200,
         )
-        return text.strip().strip('"').strip("'") or _POLITE_TOOL_FAILED
+        return text.strip().strip('"').strip("'") or _polite_tool_failed(tenant_industry)
     except Exception as exc:
         print(f"[task_branch] humanize 실패: {exc}")
-        return _POLITE_TOOL_FAILED
+        return _polite_tool_failed(tenant_industry)
 
 
 async def _resume_schedule_callback(call_id: str, tenant_id: str, pending: dict) -> dict:
@@ -282,6 +299,7 @@ async def _resume_schedule_callback(call_id: str, tenant_id: str, pending: dict)
     arguments = pending.get("arguments") or {}
     user_text = pending.get("user_text", "")
     tenant_name = pending.get("tenant_name", "")
+    tenant_industry = pending.get("tenant_industry", "")
     print(f"[task_branch] availability_confirmed 동의 → schedule_callback 자동 재실행 args={arguments}")
 
     try:
@@ -294,10 +312,10 @@ async def _resume_schedule_callback(call_id: str, tenant_id: str, pending: dict)
         )
     except Exception as exc:
         print(f"[task_branch] resume mcp 실패: {exc}")
-        return {"response_text": _POLITE_TOOL_FAILED}
+        return {"response_text": _polite_tool_failed(tenant_industry)}
 
     if mcp_result.get("status") != "success":
-        return {"response_text": _POLITE_TOOL_FAILED}
+        return {"response_text": _polite_tool_failed(tenant_industry)}
 
     # 결정적 완료 메시지 + SMS 제안 — preferred_time 기반으로 한국어 시간 조립
     time_kor = ""
@@ -310,10 +328,12 @@ async def _resume_schedule_callback(call_id: str, tenant_id: str, pending: dict)
 
     if not time_kor:
         # preferred_time 파싱 실패 — fallback 으로 humanize 사용
-        text = await humanize_tool_result(user_text, "schedule_callback", mcp_result)
+        text = await humanize_tool_result(
+            user_text, "schedule_callback", mcp_result, tenant_industry
+        )
         return {"response_text": text}
 
-    sms_body = _build_sms_body(tenant_name, time_kor)
+    sms_body = _build_sms_body(tenant_name, tenant_industry, time_kor)
     await _call_session_svc.set_pending_task(call_id, {
         "tool": "sms",
         "action_type": "send_confirm_sms",
@@ -381,11 +401,11 @@ async def _force_check_then_confirm(
         )
     except Exception as exc:
         print(f"[task_branch] check_availability 예외: {exc} → 직접 schedule_callback fallback")
-        return await _direct_schedule(call_id, tenant_id, enriched_args, tenant_name, user_text)
+        return await _direct_schedule(call_id, tenant_id, enriched_args, tenant_name, tenant_industry, user_text)
 
     if avail_result.get("status") != "success":
         print(f"[task_branch] check_availability {avail_result.get('status')} → 직접 schedule_callback fallback")
-        return await _direct_schedule(call_id, tenant_id, enriched_args, tenant_name, user_text)
+        return await _direct_schedule(call_id, tenant_id, enriched_args, tenant_name, tenant_industry, user_text)
 
     result_data = avail_result.get("result") or {}
     available = bool(result_data.get("available"))
@@ -397,6 +417,7 @@ async def _force_check_then_confirm(
             "action_type": "schedule_callback",
             "arguments": enriched_args,
             "tenant_name": tenant_name,
+            "tenant_industry": tenant_industry,
             "user_text": user_text,
             "kind": "availability_confirmed",
         })
@@ -411,6 +432,7 @@ async def _direct_schedule(
     tenant_id: str,
     arguments: dict,
     tenant_name: str,
+    tenant_industry: str,
     user_text: str,
 ) -> dict:
     """check_availability 실패 시 fallback — 직접 등록 + (성공 시) SMS 제안.
@@ -423,9 +445,9 @@ async def _direct_schedule(
             call_id=call_id, tenant_id=tenant_id,
         )
     except Exception:
-        return {"response_text": _POLITE_TOOL_FAILED}
+        return {"response_text": _polite_tool_failed(tenant_industry)}
     if mcp_result.get("status") != "success":
-        return {"response_text": _POLITE_TOOL_FAILED}
+        return {"response_text": _polite_tool_failed(tenant_industry)}
 
     time_kor = ""
     try:
@@ -435,10 +457,12 @@ async def _direct_schedule(
         pass
 
     if not time_kor:
-        text = await humanize_tool_result(user_text, "schedule_callback", mcp_result)
+        text = await humanize_tool_result(
+            user_text, "schedule_callback", mcp_result, tenant_industry
+        )
         return {"response_text": text}
 
-    sms_body = _build_sms_body(tenant_name, time_kor)
+    sms_body = _build_sms_body(tenant_name, tenant_industry, time_kor)
     await _call_session_svc.set_pending_task(call_id, {
         "tool": "sms",
         "action_type": "send_confirm_sms",
@@ -509,7 +533,7 @@ async def task_branch_node(state: CallState) -> dict:
     print(f"[task_branch] tenant={tenant_id} available={list(available.keys())}")
 
     if not available:
-        return {"response_text": _POLITE_NO_TOOLS}
+        return {"response_text": _polite_no_tools(tenant_industry)}
 
     # 2. LLM Function Calling
     tools = to_openai_tools(available)
@@ -526,7 +550,7 @@ async def task_branch_node(state: CallState) -> dict:
         )
     except Exception as exc:
         print(f"[task_branch] LLM 실패: {exc}")
-        return {"response_text": _POLITE_TOOL_FAILED}
+        return {"response_text": _polite_tool_failed(tenant_industry)}
 
     # (A) tool_call 없음 — LLM 자체 텍스트 응답 (ask 또는 거부)
     if result.get("tool_call") is None:
@@ -541,7 +565,7 @@ async def task_branch_node(state: CallState) -> dict:
     # 방어: LLM 이 카탈로그 외 도구 환각
     if action_type not in available:
         print(f"[task_branch] 알 수 없는 action_type={action_type}")
-        return {"response_text": _POLITE_NO_TOOLS}
+        return {"response_text": _polite_no_tools(tenant_industry)}
 
     spec = available[action_type]
     print(f"[task_branch] selected={action_type} args={arguments}")
@@ -607,8 +631,8 @@ async def task_branch_node(state: CallState) -> dict:
     print(f"[task_branch] mcp_result status={mcp_result.get('status')}")
 
     if mcp_result.get("status") != "success":
-        return {"response_text": _POLITE_TOOL_FAILED}
+        return {"response_text": _polite_tool_failed(tenant_industry)}
 
     # 6. 결과 humanize
-    text = await humanize_tool_result(user_text, action_type, mcp_result)
+    text = await humanize_tool_result(user_text, action_type, mcp_result, tenant_industry)
     return {"response_text": text}

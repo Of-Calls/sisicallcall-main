@@ -19,7 +19,7 @@ from app.services.speaker_verify import get_speaker_verify_service
 from app.services.stt.deepgram import DeepgramSTTService
 from app.services.tenant import DEFAULT_INDUSTRY, DEFAULT_NAME, get_greeting, get_tenant_meta, resolve_tenant_id
 from app.services.tts.azure import AzureTTSService
-from app.services.tts.filler import pick_filler
+from app.services.tts.filler import pick_filler, pick_filler_continuation
 from app.services.vad.silero_vad import SileroVADService
 from app.utils.config import settings
 
@@ -40,7 +40,7 @@ _twilio_rest = (
 _GRAPH_ENABLED = os.getenv("GRAPH_INTEGRATION_ENABLED", "false").lower() in ("1", "true", "yes")
 
 _VAD_FRAME_BYTES = 1024     # linear16 16kHz, 512 samples
-_SILENCE_THRESHOLD = 30     # 연속 침묵 VAD 프레임 수 (~1600ms)
+_SILENCE_THRESHOLD = 45     # 연속 침묵 VAD 프레임 수 (~1440ms)
 _TWILIO_CHUNK_BYTES = 160   # 20ms mulaw 8kHz — Twilio 권장 단위
 
 
@@ -344,6 +344,23 @@ async def call_ws(websocket: WebSocket):
                                         print(f"[FILLER] 재생 끝 ({filler_play:.2f}s)")
                                     except Exception as exc:
                                         print(f"[FILLER] 송출 실패 (continue): {exc}")
+
+                                # 2단계 filler — filler 1 끝났는데 graph 아직 진행 중이면
+                                # 짧은 자연 호흡 갭 (~2.2s) 후 추가 송출. graph 가 빠르면 skip
+                                # 으로 응답 지연 방지. silence 분산으로 체감 latency ↓.
+                                if graph_task is not None and not graph_task.done():
+                                    await asyncio.sleep(2.2)
+                                    if not graph_task.done():
+                                        filler2 = pick_filler_continuation()
+                                        if filler2:
+                                            is_speaking = True
+                                            try:
+                                                await _send_audio_to_twilio(websocket, stream_sid, filler2)
+                                                filler2_play = len(filler2) / 8000
+                                                await asyncio.sleep(filler2_play)
+                                                print(f"[FILLER2] 재생 끝 ({filler2_play:.2f}s)")
+                                            except Exception as exc:
+                                                print(f"[FILLER2] 송출 실패 (continue): {exc}")
 
                                 # graph 결과 await — 실패/empty 시 echo fallback
                                 response_text = transcript

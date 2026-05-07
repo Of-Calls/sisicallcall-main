@@ -24,7 +24,7 @@ INDUSTRY_CONTEXT: dict[str, dict[str, str]] = {
     },
     "finance": {
         "label": "금융기관",
-        "facility_hint": "창구, 상담실, ATM, 대기번호 같은 시설/업무",
+        "facility_hint": "창구, 상담실, ATM, 대기번호 같은 시설 또는 이체, 송금, 한도, 잔액, 이자, 대출, 예금, 적금, 환전, 분실 신고, 인증 같은 업무",
     },
     "appliance": {
         "label": "매장",
