@@ -36,7 +36,7 @@ class AuthSessionService:
             "customer_phone": customer_phone,
             "call_id": call_id,
             "status": "pending",
-            "liveness_passed": "false",
+            "liveness_passed": "true",  # liveness 단계 미구현 — 항상 통과
             "face_verified": "false",
             "face_attempts": "0",
             "created_at": now,

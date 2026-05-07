@@ -101,8 +101,6 @@ async def verify_face(auth_id: str, file: UploadFile = File(...)):
     session = await _session_svc.get_session(auth_id)
     if not session:
         raise HTTPException(status_code=404, detail="인증 세션이 없거나 만료됨")
-    if session.get("liveness_passed") != "true":
-        raise HTTPException(status_code=409, detail="Liveness 미완료 — 먼저 Liveness 인증을 완료하세요")
     if session.get("status") == "blocked":
         raise HTTPException(status_code=403, detail="인증 차단됨 — 상담원 연결로 전환됩니다")
     if session.get("face_verified") == "true":

@@ -33,16 +33,8 @@
   <h2>시시콜콜 본인인증</h2>
   <p class="subtitle" id="auth-id-label"></p>
 
-  <div class="step active" id="step1">
-    <div class="step-title">1단계 <span class="badge" id="b1">대기</span></div>
-    <p style="font-size:13px;color:#555;margin-bottom:8px">아래 버튼을 눌러 Liveness 확인을 시작합니다.</p>
-    <div id="instructions-box" class="instructions" style="display:none"></div>
-    <button class="btn-primary" id="btn-start" onclick="startLiveness()">인증 시작</button>
-    <button class="btn-primary" id="btn-done-liveness" style="display:none" onclick="completeLiveness()">✅ 동작 완료</button>
-  </div>
-
-  <div class="step" id="step2" style="display:none">
-    <div class="step-title">2단계 <span class="badge" id="b2">대기</span></div>
+  <div class="step active" id="step2">
+    <div class="step-title">본인 인증 <span class="badge" id="b2">대기</span></div>
     <p style="font-size:13px;color:#555;margin-bottom:4px">정면을 바라보고 📷 버튼을 누르세요.</p>
     <video id="video" autoplay playsinline muted></video>
     <canvas id="canvas" style="display:none"></canvas>
@@ -66,60 +58,8 @@ const authId = (() => {
   return m ? m[1] : null;
 })();
 document.getElementById('auth-id-label').textContent = 'session: ' + authId;
-let _token = null;
 
 function setStatus(msg) { document.getElementById('status').textContent = msg; }
-
-async function startLiveness() {
-  document.getElementById('btn-start').disabled = true;
-  setStatus('Liveness 지시 요청 중...');
-  try {
-    const r = await fetch('/auth/' + authId + '/liveness');
-    if (!r.ok) { const d=await r.json(); throw new Error(d.detail||r.status); }
-    const data = await r.json();
-    _token = data.token;
-    const box = document.getElementById('instructions-box');
-    box.style.display = 'block';
-    box.innerHTML = '지시 동작: <b>' + data.instructions.join(' → ') + '</b><br><small style="color:#888">동작 후 완료 버튼을 누르세요 (테스트 모드: 실제 검증 생략)</small>';
-    document.getElementById('btn-start').style.display = 'none';
-    document.getElementById('btn-done-liveness').style.display = 'block';
-    document.getElementById('b1').textContent = '진행 중';
-    setStatus('지시에 따라 동작한 후 완료 버튼을 누르세요.');
-  } catch(e) {
-    document.getElementById('btn-start').disabled = false;
-    setStatus('오류: ' + e.message);
-  }
-}
-
-async function completeLiveness() {
-  document.getElementById('btn-done-liveness').disabled = true;
-  setStatus('Liveness 검증 중...');
-  try {
-    const r = await fetch('/auth/' + authId + '/liveness', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({token: _token}),
-    });
-    if (!r.ok) { const d=await r.json(); throw new Error(d.detail||r.status); }
-    const data = await r.json();
-    if (data.liveness_passed) {
-      document.getElementById('step1').className = 'step done';
-      document.getElementById('b1').textContent = '완료';
-      document.getElementById('b1').className = 'badge ok';
-      document.getElementById('step2').style.display = 'block';
-      document.getElementById('step2').className = 'step active';
-      document.getElementById('b2').textContent = '진행 중';
-      await startCamera();
-      setStatus('카메라가 열렸습니다. 정면을 바라보세요.');
-    } else {
-      setStatus('Liveness 실패. 다시 시도하세요.');
-      document.getElementById('btn-done-liveness').disabled = false;
-    }
-  } catch(e) {
-    setStatus('오류: ' + e.message);
-    document.getElementById('btn-done-liveness').disabled = false;
-  }
-}
 
 async function startCamera() {
   try {
@@ -180,6 +120,13 @@ async function checkStatus() {
     document.getElementById('status-json').textContent = '오류: ' + e.message;
   }
 }
+
+// 페이지 진입 시 카메라 자동 시작
+(async () => {
+  document.getElementById('b2').textContent = '진행 중';
+  await startCamera();
+  setStatus('정면을 바라보고 촬영 후 인증 버튼을 누르세요.');
+})();
 </script>
 </body>
 </html>

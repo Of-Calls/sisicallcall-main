@@ -69,6 +69,22 @@ TOOL_CATALOG: dict[str, dict] = {
             "required": ["message"],
         },
     },
+    "suspend_card": {
+        "tool": "company_db",
+        "oauth_provider": None,
+        "description": "분실/도난 시 카드 사용 정지 처리 (등록된 회원의 카드를 즉시 정지). 시스템이 회원 전화번호를 자동 주입하므로 사용자에게 번호를 묻지 마세요.",
+        "requires_auth": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "phone_number": {
+                    "type": "string",
+                    "description": "정지할 카드 회원의 전화번호 (시스템 자동 주입 — LLM 은 빈 값 두세요)",
+                },
+            },
+            "required": ["phone_number"],
+        },
+    },
 }
 
 
