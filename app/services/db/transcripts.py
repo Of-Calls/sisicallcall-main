@@ -135,15 +135,30 @@ async def get_completed_call_context_from_db(
             db_call_uuid = str(call_row["id"])
 
             # transcripts 조회 — row 없으면 빈 리스트 반환 (예외 없음)
-            transcript_rows = await conn.fetch(
-                """
-                SELECT speaker, text, spoken_at
-                FROM transcripts
-                WHERE call_id = $1::uuid
-                ORDER BY turn_index ASC, spoken_at ASC
-                """,
-                db_call_uuid,
-            )
+            if tenant_id:
+                transcript_rows = await conn.fetch(
+                    """
+                    SELECT t.speaker, t.text, t.spoken_at
+                    FROM transcripts t
+                    JOIN calls c ON c.id = t.call_id
+                    WHERE t.call_id = $1::uuid
+                      AND c.tenant_id = $2::uuid
+                    ORDER BY t.turn_index ASC, t.spoken_at ASC
+                    """,
+                    db_call_uuid, tenant_id,
+                )
+            else:
+                # Internal legacy fallback only. Admin/API paths must pass tenant_id.
+                transcript_rows = await conn.fetch(
+                    """
+                    SELECT t.speaker, t.text, t.spoken_at
+                    FROM transcripts t
+                    JOIN calls c ON c.id = t.call_id
+                    WHERE t.call_id = $1::uuid
+                    ORDER BY t.turn_index ASC, t.spoken_at ASC
+                    """,
+                    db_call_uuid,
+                )
 
             transcripts = [
                 {

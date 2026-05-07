@@ -16,6 +16,7 @@ asyncpg 모듈 레벨 connection pool 사용 — 매 INSERT 마다 connect/close
 """
 import asyncio
 import re
+from datetime import datetime
 
 import asyncpg
 
@@ -139,3 +140,89 @@ async def insert_transcript(
             "insert_transcript failed db_call_id=%s turn=%s speaker=%s err=%s",
             db_call_id, turn_index, speaker, e,
         )
+
+
+_TRANSCRIPTS_BY_CALL_ID_SQL = """
+SELECT
+    t.id,
+    t.call_id,
+    t.turn_index,
+    t.speaker,
+    t.text,
+    t.response_path,
+    t.reviewer_applied,
+    t.reviewer_verdict,
+    t.is_barge_in,
+    t.spoken_at
+FROM transcripts t
+JOIN calls c ON c.id = t.call_id
+WHERE t.call_id = $1::uuid
+  AND c.tenant_id = $2::uuid
+ORDER BY t.turn_index ASC, t.spoken_at ASC
+"""
+
+_CALL_BELONGS_TO_TENANT_SQL = """
+SELECT EXISTS (
+    SELECT 1
+    FROM calls c
+    WHERE c.id = $1::uuid
+      AND c.tenant_id = $2::uuid
+)
+"""
+
+
+def _isoformat(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _transcript_row_to_dict(row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "call_id": str(row["call_id"]),
+        "turn_index": row["turn_index"],
+        "speaker": row["speaker"],
+        "text": row["text"],
+        "response_path": row["response_path"],
+        "reviewer_applied": row["reviewer_applied"],
+        "reviewer_verdict": row["reviewer_verdict"],
+        "is_barge_in": row["is_barge_in"],
+        "spoken_at": _isoformat(row["spoken_at"]),
+    }
+
+
+async def get_transcripts_by_call_id(
+    call_id: str,
+    tenant_id: str,
+) -> list[dict] | None:
+    """관리자/API 외부 응답용 transcript 조회.
+
+    transcripts에는 tenant_id가 없으므로 반드시 calls와 JOIN해서 JWT tenant를
+    검증한다. 반환값이 None이면 call이 없거나 tenant가 다른 경우이고, 빈 list는
+    해당 tenant의 정상 call이지만 transcript row가 없는 경우다.
+    """
+    if not _is_uuid(call_id) or not _is_uuid(tenant_id):
+        return None
+
+    try:
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(_TRANSCRIPTS_BY_CALL_ID_SQL, call_id, tenant_id)
+            if rows:
+                return [_transcript_row_to_dict(row) for row in rows]
+
+            belongs_to_tenant = await conn.fetchval(
+                _CALL_BELONGS_TO_TENANT_SQL,
+                call_id,
+                tenant_id,
+            )
+            return [] if belongs_to_tenant else None
+    except Exception as e:
+        logger.warning(
+            "get_transcripts_by_call_id failed call_id=%s tenant_id=%s err=%s",
+            call_id, tenant_id, e,
+        )
+        return None

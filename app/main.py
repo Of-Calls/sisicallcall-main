@@ -4,10 +4,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import APP_DESCRIPTION, APP_TITLE, APP_VERSION
 from app.core.middleware import RequestLoggingMiddleware
-from app.api.v1 import auth, call, post_call, summary, tenant, dashboard, vision
+from app.api.v1 import admin_auth, auth, call, call_history, dashboard, post_call, summary, tenant, vision
 from app.api.v1.oauth import router as oauth_router
 from app.services.embedding import get_embedder
 from app.utils.config import settings
@@ -48,13 +49,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+    ],
+    # Keep this False while the frontend stores access tokens in localStorage.
+    # If refresh-token cookies are added later, switch to True only with
+    # explicit origins, secure cookie settings, and matching SameSite policy.
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(call.router,      prefix="/call",       tags=["call"])
+app.include_router(call_history.router, prefix="/call",    tags=["call-history"])
 app.include_router(post_call.router, prefix="/post-call",  tags=["post-call"])
 app.include_router(summary.router,   prefix="/summary",    tags=["summary"])
 app.include_router(tenant.router,    prefix="/tenant",     tags=["tenant"])
 app.include_router(dashboard.router, prefix="/dashboard",  tags=["dashboard"])
+app.include_router(admin_auth.router, prefix="/auth",      tags=["admin-auth"])
 app.include_router(auth.router,      prefix="/auth",       tags=["auth"])
 app.include_router(vision.router,    prefix="/vision",     tags=["vision"])
 app.include_router(oauth_router,     prefix="/api/v1/oauth", tags=["oauth"])

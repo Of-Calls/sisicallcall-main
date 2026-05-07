@@ -539,6 +539,89 @@ class TestModuleInvariants:
 
 class TestRepoSqlSpotChecks:
     @pytest.mark.asyncio
+    async def test_dashboard_recent_calls_uses_tenant_left_joins_and_pagination(self):
+        from app.repositories import post_call_dashboard_repo as repo
+
+        row = {
+            "id": "call-1",
+            "caller_number": "+821012345678",
+            "status": "completed",
+            "started_at": datetime(2026, 5, 4, 10, 0, tzinfo=timezone.utc),
+            "duration_sec": 180,
+            "summary_short": "summary",
+            "customer_emotion": "negative",
+            "resolution_status": "escalated",
+            "priority": "high",
+        }
+        conn = _FakeConn(fetch_rows=[row], fetchrow_value={"total": 1})
+
+        result = await repo.fetch_dashboard_recent_calls(
+            TENANT_ID,
+            limit=5,
+            offset=2,
+            conn=conn,
+        )
+
+        assert result["total"] == 1
+        assert result["offset"] == 2
+        assert result["limit"] == 5
+        assert result["items"][0]["id"] == "call-1"
+        assert result["items"][0]["priority"] == "high"
+
+        count_sql, count_params = conn.fetchrow_calls[0]
+        list_sql, list_params = conn.fetch_calls[0]
+        assert "WHERE c.tenant_id = $1::uuid" in count_sql
+        assert "LEFT JOIN call_summaries" in list_sql
+        assert "LEFT JOIN voc_analyses" in list_sql
+        assert "OFFSET $2" in list_sql
+        assert "LIMIT $3" in list_sql
+        assert count_params == (TENANT_ID,)
+        assert list_params == (TENANT_ID, 2, 5)
+
+    @pytest.mark.asyncio
+    async def test_dashboard_intent_distribution_uses_voc_then_summary_fallback(self):
+        from app.repositories import post_call_dashboard_repo as repo
+
+        conn = _FakeConn(fetch_rows=[{"label": "예약/일정", "count": 3}])
+
+        result = await repo.fetch_dashboard_intent_distribution(
+            TENANT_ID,
+            limit=7,
+            conn=conn,
+        )
+
+        sql, params = conn.fetch_calls[0]
+        assert "va.intent_result->>'primary_category'" in sql
+        assert "cs.customer_intent" in sql
+        assert "WHERE c.tenant_id = $1::uuid" in sql
+        assert "WHERE NULLIF(label, '') IS NOT NULL" in sql
+        assert params == (TENANT_ID, 7)
+        assert result == [{"label": "예약/일정", "count": 3}]
+
+    @pytest.mark.asyncio
+    async def test_dashboard_emotion_distribution_counts_keeps_four_key_shape(self):
+        from app.repositories import post_call_dashboard_repo as repo
+
+        conn = _FakeConn(
+            fetch_rows=[
+                {"label": "negative", "count": 4},
+                {"label": "surprised", "count": 2},
+            ],
+        )
+
+        result = await repo.fetch_dashboard_emotion_distribution_counts(
+            TENANT_ID,
+            conn=conn,
+        )
+
+        sql, params = conn.fetch_calls[0]
+        assert "FROM call_summaries cs" in sql
+        assert "JOIN calls c" in sql
+        assert "WHERE cs.tenant_id = $1::uuid" in sql
+        assert params == (TENANT_ID,)
+        assert result == {"positive": 0, "neutral": 2, "negative": 4, "angry": 0}
+
+    @pytest.mark.asyncio
     async def test_action_status_distribution_uses_text_cast(self):
         from app.repositories import post_call_dashboard_repo as repo
 

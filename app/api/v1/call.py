@@ -90,7 +90,7 @@ async def incoming_call(request: Request):
 
 
 async def _send_audio_to_twilio(websocket: WebSocket, stream_sid: str, audio: bytes) -> None:
-    """mulaw 8kHz 음성을 20ms 청크 단위로 Twilio Media Stream에 송출."""
+    """Send mulaw 8kHz audio to Twilio Media Streams in 20ms chunks."""
     for i in range(0, len(audio), _TWILIO_CHUNK_BYTES):
         chunk = audio[i:i + _TWILIO_CHUNK_BYTES]
         msg = {
@@ -143,7 +143,7 @@ async def _run_conversational_graph(
 @router.websocket("/ws")
 async def call_ws(websocket: WebSocket):
     await websocket.accept()
-    print("[WS] Twilio 연결됨")
+    print("[WS] Twilio connected")
 
     audio_buffer = bytearray()    # STT용 (mulaw 8kHz 누적)
     pcm_buffer = bytearray()      # VAD frame 잘라쓰는 용 (linear16 16kHz 임시)
@@ -252,7 +252,14 @@ async def call_ws(websocket: WebSocket):
                 audio_buffer.extend(mulaw)
 
                 pcm_8k = audioop.ulaw2lin(mulaw, 2)
-                pcm_16k, ratecv_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, ratecv_state)
+                pcm_16k, ratecv_state = audioop.ratecv(
+                    pcm_8k,
+                    2,
+                    1,
+                    8000,
+                    16000,
+                    ratecv_state,
+                )
                 pcm_buffer.extend(pcm_16k)
 
                 while len(pcm_buffer) >= _VAD_FRAME_BYTES:

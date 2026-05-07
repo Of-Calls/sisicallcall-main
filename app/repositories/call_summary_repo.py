@@ -63,6 +63,52 @@ def _as_list(value) -> list:
     return [value]
 
 
+def _isoformat(value) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _jsonb_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return copy.deepcopy(value)
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return []
+        if isinstance(parsed, list):
+            return copy.deepcopy(parsed)
+    return []
+
+
+def _summary_row_to_record(row) -> dict:
+    summary = {
+        "summary_short": row["summary_short"] or "",
+        "summary_detailed": row["summary_detailed"] or "",
+        "customer_intent": row["customer_intent"] or "",
+        "customer_emotion": row["customer_emotion"] or "",
+        "resolution_status": row["resolution_status"] or "",
+        "keywords": _jsonb_list(row["keywords"]),
+        "handoff_notes": row["handoff_notes"] or "",
+        "generation_mode": row["generation_mode"] or "",
+        "model_used": row["model_used"] or "",
+    }
+    return {
+        "call_id": str(row["call_id"]),
+        "tenant_id": str(row["tenant_id"]),
+        "summary": summary,
+        "created_at": _isoformat(row["created_at"]),
+        "updated_at": _isoformat(row["updated_at"]),
+    }
+
+
 def _summary_db_payload(summary: dict) -> dict:
     emotion = summary.get("customer_emotion") or summary.get("emotion") or "neutral"
     if emotion not in {"positive", "neutral", "negative", "angry"}:
@@ -233,9 +279,63 @@ async def _fetch_call_tenant_id(conn, call_id: str) -> str | None:
     return str(row["tenant_id"])
 
 
-async def get_summary_by_call_id(call_id: str) -> dict | None:
+async def _fetch_summary_from_db(call_id: str, tenant_id: str) -> dict | None:
+    if not _is_uuid(call_id) or not _is_uuid(tenant_id):
+        return None
+
+    conn = None
+    try:
+        conn = await asyncpg.connect(_database_url())
+        row = await conn.fetchrow(
+            """
+            SELECT
+                call_id,
+                tenant_id,
+                summary_short,
+                summary_detailed,
+                customer_intent,
+                customer_emotion,
+                resolution_status,
+                keywords,
+                handoff_notes,
+                generation_mode,
+                model_used,
+                created_at,
+                updated_at
+            FROM call_summaries
+            WHERE call_id = $1::uuid
+              AND tenant_id = $2::uuid
+            LIMIT 1
+            """,
+            call_id,
+            tenant_id,
+        )
+        if row is None:
+            return None
+        return _summary_row_to_record(row)
+    except Exception as exc:
+        logger.warning("call summary DB fallback failed call_id=%s err=%s", call_id, exc)
+        return None
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+async def get_summary_by_call_id(
+    call_id: str,
+    tenant_id: str | None = None,
+) -> dict | None:
     record = _summary_store.get(call_id)
-    return copy.deepcopy(record) if record is not None else None
+    if record is None:
+        if tenant_id is None:
+            return None
+        return await _fetch_summary_from_db(call_id, tenant_id)
+    if tenant_id is not None:
+        record_tenant_id = str(record.get("tenant_id") or "").strip().lower()
+        expected_tenant_id = str(tenant_id).strip().lower()
+        if record_tenant_id != expected_tenant_id:
+            return None
+    return copy.deepcopy(record)
 
 
 async def seed_call_context(

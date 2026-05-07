@@ -1,9 +1,12 @@
 from app.repositories.call_repo import (
     insert_call,
     finalize_call,
+    list_calls_for_tenant,
+    get_call_by_id_for_tenant,
 )
 from app.repositories.transcript_repo import (
     insert_transcript,
+    get_transcripts_by_call_id,
 )
 from app.repositories.call_summary_repo import (
     CallSummaryRepository,
@@ -23,6 +26,7 @@ from app.repositories.mcp_action_log_repo import (
     save_action_logs,
     find_successful_action,
     get_action_logs_by_call_id,
+    get_action_logs_by_call_id_for_tenant,
     get_action_logs,
 )
 from app.repositories.dashboard_repo import (
@@ -34,6 +38,12 @@ from app.repositories.dashboard_repo import (
     get_emotion_distribution,
     get_priority_queue,
 )
+from app.repositories.admin_user_repo import (
+    create_admin_user,
+    find_admin_user_by_email,
+    find_admin_user_by_id,
+    update_last_login,
+)
 
 __all__ = [
     # classes
@@ -44,8 +54,11 @@ __all__ = [
     # call (calls 테이블 — 통화 메타)
     "insert_call",
     "finalize_call",
+    "list_calls_for_tenant",
+    "get_call_by_id_for_tenant",
     # transcript (transcripts 테이블 — 발화 단위)
     "insert_transcript",
+    "get_transcripts_by_call_id",
     # call_summary
     "save_summary",
     "get_summary_by_call_id",
@@ -59,6 +72,7 @@ __all__ = [
     "save_action_logs",
     "find_successful_action",
     "get_action_logs_by_call_id",
+    "get_action_logs_by_call_id_for_tenant",
     "get_action_logs",
     # dashboard
     "upsert_dashboard_payload",
@@ -67,4 +81,9 @@ __all__ = [
     "get_dashboard_overview",
     "get_emotion_distribution",
     "get_priority_queue",
+    # admin_user
+    "create_admin_user",
+    "find_admin_user_by_email",
+    "find_admin_user_by_id",
+    "update_last_login",
 ]

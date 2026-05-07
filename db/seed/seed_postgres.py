@@ -14,9 +14,16 @@ PostgreSQL 시드 — 병원 + 음식점 tenant 및 KNN intent 예시
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 import asyncpg
 from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.core.security import hash_password
 
 load_dotenv()
 
@@ -105,6 +112,24 @@ KNN_INTENTS = {
     ],
 }
 
+# 개발/시드 전용 관리자 계정입니다. 운영 비밀번호로 사용하지 마세요.
+ADMIN_USERS = [
+    {
+        "tenant_name": "서울중앙병원",
+        "email": "admin@seoul-hospital.test",
+        "password": "password1234",
+        "name": "서울중앙병원 관리자",
+        "role": "owner",
+    },
+    {
+        "tenant_name": "한밭식당",
+        "email": "admin@hanbat.test",
+        "password": "password1234",
+        "name": "한밭식당 관리자",
+        "role": "owner",
+    },
+]
+
 
 async def seed():
     conn = await asyncpg.connect(DATABASE_URL)
@@ -135,6 +160,36 @@ async def seed():
             tenant_ids[t["name"]] = row["id"]
             print(f"  ✅ tenant: {t['name']} ({t['twilio_number']}) — id={row['id']}")
 
+        # --- admin_users INSERT (개발/시드 전용 계정, 멱등 upsert) ---
+        for admin in ADMIN_USERS:
+            tenant_id = tenant_ids[admin["tenant_name"]]
+            password_hash = hash_password(admin["password"])
+            row = await conn.fetchrow(
+                """
+                INSERT INTO admin_users (
+                    tenant_id, email, password_hash, name, role, is_active
+                )
+                VALUES ($1::uuid, LOWER($2), $3, $4, $5, TRUE)
+                ON CONFLICT (email) DO UPDATE
+                    SET tenant_id = EXCLUDED.tenant_id,
+                        password_hash = EXCLUDED.password_hash,
+                        name = EXCLUDED.name,
+                        role = EXCLUDED.role,
+                        is_active = TRUE,
+                        updated_at = now()
+                RETURNING id
+                """,
+                tenant_id,
+                admin["email"],
+                password_hash,
+                admin["name"],
+                admin["role"],
+            )
+            print(
+                f"  ✅ admin_user: {admin['email']} "
+                f"({admin['tenant_name']}) — id={row['id']}"
+            )
+
         # --- knn_intents INSERT (멱등: 같은 tenant_id + example_text 중복 체크) ---
         total_inserted = 0
         for tenant_name, intents in KNN_INTENTS.items():
@@ -162,7 +217,11 @@ async def seed():
         # --- 최종 통계 ---
         tenant_count = await conn.fetchval("SELECT COUNT(*) FROM tenants")
         intent_count = await conn.fetchval("SELECT COUNT(*) FROM knn_intents")
-        print(f"\n📊 현재 상태: tenants={tenant_count}개, knn_intents={intent_count}개")
+        admin_count = await conn.fetchval("SELECT COUNT(*) FROM admin_users")
+        print(
+            f"\n📊 현재 상태: tenants={tenant_count}개, "
+            f"admin_users={admin_count}개, knn_intents={intent_count}개"
+        )
         print("✅ PostgreSQL 시드 완료\n")
 
     finally:

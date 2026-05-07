@@ -17,6 +17,14 @@ Notes:
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
+
+import asyncpg
+
+from app.utils.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -27,6 +35,22 @@ def _iso(value: Any) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _database_url() -> str:
+    return settings.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _is_uuid(value: str | None) -> bool:
+    try:
+        UUID(str(value))
+        return True
+    except Exception:
+        return False
+
+
+async def _connect():
+    return await asyncpg.connect(_database_url())
 
 
 def _row_to_dict(row: Any) -> dict:
@@ -49,6 +73,18 @@ def _append_date_clauses(
         params.append(date_to)
         sql += f"\n  AND {column} <= ${len(params)}::timestamptz"
     return sql
+
+
+async def _fetch_with_optional_conn(conn, callback):
+    owns_conn = conn is None
+    if owns_conn:
+        conn = await _connect()
+
+    try:
+        return await callback(conn)
+    finally:
+        if owns_conn and conn is not None:
+            await conn.close()
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -202,6 +238,110 @@ async def fetch_emotion_distribution(
 
     rows = await conn.fetch(sql, *params)
     return [{"label": r["label"], "count": int(r["count"])} for r in rows]
+
+
+async def fetch_dashboard_emotion_distribution_counts(
+    tenant_id: str,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    conn=None,
+) -> dict[str, int] | None:
+    """DB-backed emotion counts for the public dashboard endpoint.
+
+    Returns ``None`` when DB lookup is not possible so the API layer can keep
+    the legacy in-memory endpoint behavior as a fallback.
+    """
+    if not _is_uuid(tenant_id):
+        return None
+
+    async def _query(active_conn):
+        sql = """
+            SELECT
+              NULLIF(cs.customer_emotion, '') AS label,
+              COUNT(*)::int AS count
+            FROM call_summaries cs
+            JOIN calls c ON c.id = cs.call_id
+                        AND c.tenant_id = cs.tenant_id
+            WHERE cs.tenant_id = $1::uuid
+        """
+        params: list = [tenant_id]
+        sql = _append_date_clauses(
+            sql, params,
+            column="c.started_at", date_from=date_from, date_to=date_to,
+        )
+        sql += "\nGROUP BY label"
+
+        rows = await active_conn.fetch(sql, *params)
+        result = {"positive": 0, "neutral": 0, "negative": 0, "angry": 0}
+        for row in rows:
+            label = str(row["label"] or "neutral").strip().lower()
+            count = int(row["count"] or 0)
+            if label in result:
+                result[label] += count
+            else:
+                result["neutral"] += count
+        return result
+
+    try:
+        return await _fetch_with_optional_conn(conn, _query)
+    except Exception as exc:
+        logger.warning("dashboard emotion distribution DB query failed tenant_id=%s err=%s", tenant_id, exc)
+        return None
+
+
+async def fetch_dashboard_intent_distribution(
+    tenant_id: str,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 10,
+    conn=None,
+) -> list[dict] | None:
+    """DB-backed intent distribution for dashboard charts."""
+    if not _is_uuid(tenant_id):
+        return None
+
+    normalized_limit = max(1, min(int(limit), 100))
+
+    async def _query(active_conn):
+        sql = """
+            SELECT label, COUNT(*)::int AS count
+            FROM (
+                SELECT
+                  COALESCE(
+                    NULLIF(va.intent_result->>'primary_category', ''),
+                    NULLIF(cs.customer_intent, '')
+                  ) AS label
+                FROM calls c
+                LEFT JOIN voc_analyses va ON va.call_id = c.id
+                                          AND va.tenant_id = c.tenant_id
+                LEFT JOIN call_summaries cs ON cs.call_id = c.id
+                                            AND cs.tenant_id = c.tenant_id
+                WHERE c.tenant_id = $1::uuid
+        """
+        params: list = [tenant_id]
+        sql = _append_date_clauses(
+            sql, params,
+            column="c.started_at", date_from=date_from, date_to=date_to,
+        )
+        sql += """
+            ) scoped
+            WHERE NULLIF(label, '') IS NOT NULL
+            GROUP BY label
+            ORDER BY count DESC, label ASC
+        """
+        params.append(normalized_limit)
+        sql += f"\nLIMIT ${len(params)}"
+
+        rows = await active_conn.fetch(sql, *params)
+        return [{"label": row["label"], "count": int(row["count"] or 0)} for row in rows]
+
+    try:
+        return await _fetch_with_optional_conn(conn, _query)
+    except Exception as exc:
+        logger.warning("dashboard intent distribution DB query failed tenant_id=%s err=%s", tenant_id, exc)
+        return None
 
 
 async def fetch_priority_distribution(
@@ -366,6 +506,96 @@ async def fetch_recent_calls(
         }
         for r in rows
     ]
+
+
+async def fetch_dashboard_recent_calls(
+    tenant_id: str,
+    *,
+    limit: int = 10,
+    offset: int = 0,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    conn=None,
+) -> dict | None:
+    """DB-backed recent call list for the dashboard home widget."""
+    if not _is_uuid(tenant_id):
+        return None
+
+    normalized_limit = max(1, min(int(limit), 100))
+    normalized_offset = max(0, int(offset))
+
+    async def _query(active_conn):
+        count_sql = """
+            SELECT COUNT(*)::int AS total
+            FROM calls c
+            WHERE c.tenant_id = $1::uuid
+        """
+        count_params: list = [tenant_id]
+        count_sql = _append_date_clauses(
+            count_sql, count_params,
+            column="c.started_at", date_from=date_from, date_to=date_to,
+        )
+
+        list_sql = """
+            SELECT
+              c.id::text AS id,
+              c.caller_number,
+              c.status,
+              c.started_at,
+              c.duration_sec,
+              cs.summary_short,
+              cs.customer_emotion,
+              cs.resolution_status,
+              NULLIF(va.priority_result->>'priority', '') AS priority
+            FROM calls c
+            LEFT JOIN call_summaries cs ON cs.call_id = c.id
+                                      AND cs.tenant_id = c.tenant_id
+            LEFT JOIN voc_analyses va ON va.call_id = c.id
+                                     AND va.tenant_id = c.tenant_id
+            WHERE c.tenant_id = $1::uuid
+        """
+        list_params: list = [tenant_id]
+        list_sql = _append_date_clauses(
+            list_sql, list_params,
+            column="c.started_at", date_from=date_from, date_to=date_to,
+        )
+        list_params.append(normalized_offset)
+        offset_pos = len(list_params)
+        list_params.append(normalized_limit)
+        limit_pos = len(list_params)
+        list_sql += (
+            "\nORDER BY COALESCE(c.started_at, c.created_at) DESC"
+            f"\nOFFSET ${offset_pos}"
+            f"\nLIMIT ${limit_pos}"
+        )
+
+        total_row = await active_conn.fetchrow(count_sql, *count_params)
+        rows = await active_conn.fetch(list_sql, *list_params)
+        return {
+            "items": [
+                {
+                    "id": row["id"],
+                    "caller_number": row["caller_number"],
+                    "status": row["status"],
+                    "started_at": _iso(row["started_at"]),
+                    "duration_sec": row["duration_sec"],
+                    "summary_short": row["summary_short"],
+                    "customer_emotion": row["customer_emotion"],
+                    "resolution_status": row["resolution_status"],
+                    "priority": row["priority"],
+                }
+                for row in rows
+            ],
+            "total": int((total_row or {})["total"] or 0) if total_row else 0,
+            "offset": normalized_offset,
+            "limit": normalized_limit,
+        }
+
+    try:
+        return await _fetch_with_optional_conn(conn, _query)
+    except Exception as exc:
+        logger.warning("dashboard recent calls DB query failed tenant_id=%s err=%s", tenant_id, exc)
+        return None
 
 
 async def fetch_recent_actions(

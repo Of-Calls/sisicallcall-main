@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     env: str = "development"
     log_level: str = "INFO"
 
+    # Admin JWT
+    jwt_secret_key: str = "change-me"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+
     # TTS Output Channel 모드 — "mock" (기본, 테스트/유닛) | "twilio" (프로덕션 WebSocket)
     tts_channel_mode: str = "mock"
 
