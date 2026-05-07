@@ -3,6 +3,7 @@ import json
 from app.agents.conversational.state import CallState
 from app.agents.conversational.prompts.query_refine import build_system_prompt
 from app.services.llm.gpt4o_mini import GPT4OMiniService
+from app.utils.korean_time import extract_absolute_datetime, format_iso
 
 _llm = GPT4OMiniService()
 _HISTORY_TURN_LIMIT = 6  # 직전 3턴 (user+assistant 합쳐 6개 항목)
@@ -51,6 +52,17 @@ async def query_refine_node(state: CallState) -> dict:
     # is_goodbye=True 면 rewritten 빈값 허용 (라우팅에 영향 없음)
     if is_clear and not is_goodbye and not rewritten:
         rewritten = user_text
+
+    # 코드로 절대 날짜 강제 — LLM 의 한국어 요일/주 산수 비결정성 보완.
+    # 사용자 발화에서 "이번주/다음주 X요일", "오늘/내일/모레/글피" + 시간 표현이
+    # 잡히면 코드 결과를 rewritten 앞에 prepend → task_branch 가 첫 매칭 우선 사용.
+    if is_clear and not is_goodbye:
+        code_dt = extract_absolute_datetime(user_text)
+        if code_dt is not None:
+            iso = format_iso(code_dt)
+            if iso not in rewritten:
+                rewritten = f"(날짜: {iso}) {rewritten}"
+                print(f"[query_refine] 코드 절대 날짜 강제: {iso}")
 
     print(f"[query_refine] is_clear={is_clear} rewritten='{rewritten}' missing='{missing}' goodbye={is_goodbye}")
     return {
