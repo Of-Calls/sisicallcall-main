@@ -77,6 +77,21 @@ def _is_short_affirm(user_text: str) -> bool:
     return True
 
 
+def _is_explicit_decline(user_text: str) -> bool:
+    """명시 거절어 detection — pending 거절 안전망.
+
+    query_refine 이 거절을 동의로 잘못 분류하는 경우의 fallback. 거절어가
+    발화 시작 또는 substring 으로 보이면 True. "아니요 X로 해주세요" 같은
+    하이브리드 발화도 거절 우선 처리.
+    """
+    s = user_text.lstrip()
+    if s.startswith(("아니", "안 ", "안해", "싫", "괜찮")):
+        return True
+    if "말고" in s:
+        return True
+    return False
+
+
 def _format_check_response(result_data: dict) -> str:
     """check_availability 결과 → 음성 응답 텍스트.
 
@@ -446,19 +461,24 @@ async def task_branch_node(state: CallState) -> dict:
     # 0. pending 처리 — 직전 turn 의 제안 (예약 가능 안내 / SMS 안내) 에 대한
     #    동의/거절. 1차: query_refine 핵심 규칙 3 의 "사용자가 ... 동의함/거절함" 패턴.
     #    2차: 짧은 긍정 발화 + kind 별 키워드 (LLM rewrite 가 패턴 안 만든 경우 안전망).
+    #    안전망: 명시 거절어 ("아니요" 등) 보이면 LLM 이 잘못 동의 패턴화해도 거절 강제.
     pending = await _call_session_svc.get_pending_task(call_id)
     if pending:
         kind = pending.get("kind", "")
         decision_src = f"{rewritten} {user_text}"
+        explicit_decline = _is_explicit_decline(user_text)
         agreed = (
             "동의" in decision_src
             or "진행" in rewritten
             or _is_short_affirm(user_text)
         )
-        declined = "거절" in decision_src
         # kind 별 추가 키워드 (LLM 이 패턴 안 만들고 명시적 동작어로 rewrite 한 경우)
         if not agreed and kind == "sms_offer":
             agreed = "보내" in user_text or "발송" in decision_src
+        # 거절어 우선 — "아니요 X로 해주세요" 같은 하이브리드 발화는 거절로 처리
+        if explicit_decline:
+            agreed = False
+        declined = "거절" in decision_src or explicit_decline
 
         if kind == "availability_confirmed":
             if agreed:

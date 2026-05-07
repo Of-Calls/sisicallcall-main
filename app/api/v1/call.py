@@ -40,7 +40,7 @@ _twilio_rest = (
 _GRAPH_ENABLED = os.getenv("GRAPH_INTEGRATION_ENABLED", "false").lower() in ("1", "true", "yes")
 
 _VAD_FRAME_BYTES = 1024     # linear16 16kHz, 512 samples
-_SILENCE_THRESHOLD = 50     # 연속 침묵 VAD 프레임 수 (~1600ms)
+_SILENCE_THRESHOLD = 30     # 연속 침묵 VAD 프레임 수 (~1600ms)
 _TWILIO_CHUNK_BYTES = 160   # 20ms mulaw 8kHz — Twilio 권장 단위
 
 
