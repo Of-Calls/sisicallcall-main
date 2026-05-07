@@ -102,8 +102,17 @@ def _table_text_dump(raw_table: dict) -> str:
 
 def _flatten_json(data: dict) -> list[FlatElement]:
     """opendataloader JSON kids 트리를 평탄한 list 로 (heading/paragraph/list/table 채택)."""
+    kids = data.get("kids") or []
+    # PDF 좌표계(y=0 페이지 하단, y 증가=위쪽)기준 page → top-y 내림차순 정렬.
+    # cross-page 단락이 heading보다 앞에 오는 opendataloader 순서 버그 방어.
+    def _sort_key(k: dict) -> tuple:
+        page = int(k.get("page number") or 0)
+        bbox = k.get("bounding box") or []
+        top_y = bbox[3] if len(bbox) >= 4 else 0
+        return (page, -top_y)
+    kids = sorted(kids, key=_sort_key)
     out: list[FlatElement] = []
-    for kid in data.get("kids") or []:
+    for kid in kids:
         if not isinstance(kid, dict):
             continue
         kt = kid.get("type")
@@ -168,7 +177,7 @@ class Chunk:
     page: int               # 시작 페이지
     bbox: Optional[list[float]]
     raw_table: Optional[dict] = None  # table 청크만 — 자연어화 LLM 입력용
-    heading_path: list[str] = field(default_factory=list)  # L2 이상 hierarchy (L1 은 거의 모든 청크 공통이라 제외)
+    heading_path: list[str] = field(default_factory=list)  # heading hierarchy (L1 포함 전체)
 
 
 def _group_into_chunks(elements: list[FlatElement]) -> list[Chunk]:
@@ -178,7 +187,7 @@ def _group_into_chunks(elements: list[FlatElement]) -> list[Chunk]:
       - heading 만나면 누적 section flush + heading stack 갱신 (heading 자체는 본문에 X)
       - table 만나면 누적 flush 후 단독 청크 (절대 split X)
       - paragraph/list 누적, MAX_CHUNK_CHARS 초과 시 자동 flush
-      - chunk 마다 현재 heading hierarchy snapshot — L1 제외 L2 이상만 path 로
+      - chunk 마다 현재 heading hierarchy snapshot — L1 포함 전체 path 로
     """
     chunks: list[Chunk] = []
     heading_stack: list[tuple[int, str]] = []  # (level, text), L1 부터 가장 깊은 level 까지
@@ -188,7 +197,7 @@ def _group_into_chunks(elements: list[FlatElement]) -> list[Chunk]:
         return heading_stack[-1][1] if heading_stack else ""
 
     def current_path() -> list[str]:
-        return [t for lv, t in heading_stack if lv >= 2]
+        return [t for _, t in heading_stack]
 
     def flush_section():
         nonlocal current_section
