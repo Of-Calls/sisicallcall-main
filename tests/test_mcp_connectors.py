@@ -704,7 +704,7 @@ async def test_jira_real_api_success_with_cloud_id(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_jira_real_api_no_site_skipped(monkeypatch):
-    """Jira real mode + tenant token + cloud_id/base_url 없음 → jira_site_not_configured."""
+    """Jira real mode + tenant token + cloud_id/base_url 없음 → jira_workspace_not_selected."""
     from cryptography.fernet import Fernet
     from app.services.oauth.token_crypto import reset_fernet_cache, encrypt_token
 
@@ -726,7 +726,7 @@ async def test_jira_real_api_no_site_skipped(monkeypatch):
     )
 
     assert result["status"] == "skipped"
-    assert result["error"] == "jira_site_not_configured"
+    assert result["error"] == "jira_workspace_not_selected"
 
     from app.repositories.tenant_integration_repo import tenant_integration_repo
     tenant_integration_repo.clear_integrations()

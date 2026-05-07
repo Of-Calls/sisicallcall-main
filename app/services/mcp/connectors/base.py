@@ -19,10 +19,17 @@ import 시점에 외부 API / MCP 서버 연결을 만들지 않는다.
 
 ── tenant OAuth 분기 원칙 (MCP_USE_TENANT_OAUTH=true) ───────────────────────
 - _use_tenant_oauth() == True AND tenant_id AND _oauth_provider_name:
-    _try_tenant_token() 호출
+    _try_tenant_token() 호출 — DB / file / memory 백엔드 무관
     → connected:     skipped("tenant_token_found_but_real_execute_not_implemented")
     → not connected: skipped("tenant_integration_not_connected")
-      MCP_ALLOW_ENV_FALLBACK=true이면 .env 방식으로 폴백
+      MCP_ALLOW_ENV_FALLBACK=true 일 때만 .env 방식으로 폴백 가능 (실서비스
+      에서는 false 권장 — env fallback 은 dev/demo 편의 기능).
+
+── provider alias ──────────────────────────────────────────────────────────
+DB / file 에 저장된 row 의 provider 이름이 실제 connector 의
+``_oauth_provider_name`` 과 일치하는 게 원칙이지만, 과거 OAuth route 가
+``google_gmail`` / ``google_calendar`` 로 저장한 row 가 있을 수 있다.
+``_PROVIDER_ALIASES`` 가 후보 provider 를 순서대로 조회한다.
 """
 from __future__ import annotations
 
@@ -33,6 +40,22 @@ from datetime import datetime
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# Connector 의 ``_oauth_provider_name`` 과 tenant_integrations.provider 가
+# 다른 이름으로 저장됐을 때 후보를 순서대로 조회한다. 첫 번째가 canonical.
+_PROVIDER_ALIASES: dict[str, list[str]] = {
+    "google_gmail":    ["google_gmail", "gmail"],
+    "gmail":           ["gmail", "google_gmail"],
+    "google_calendar": ["google_calendar", "calendar"],
+    "calendar":        ["calendar", "google_calendar"],
+    "slack":           ["slack"],
+    "jira":            ["jira"],
+}
+
+
+def _alias_candidates(provider: str) -> list[str]:
+    return _PROVIDER_ALIASES.get(provider, [provider])
 
 
 class BaseMCPConnector(ABC):
@@ -73,6 +96,38 @@ class BaseMCPConnector(ABC):
 
     # ── tenant OAuth 헬퍼 ─────────────────────────────────────────────────────
 
+    def _resolve_tenant_integration(self, tenant_id: str):
+        """
+        ``_oauth_provider_name`` + alias 후보를 순서대로 DB / file / memory 에서
+        조회한다. 첫 번째 connected row 를 우선 반환하고, 없으면 마지막으로
+        매칭된 row (disconnected/expired/error) 를 반환한다.
+
+        Returns:
+            (integration, source_provider) — 둘 다 None 가능.
+        """
+        from app.models.tenant_integration import IntegrationStatus
+        from app.repositories.tenant_integration_repo import get_integration
+
+        connected = None
+        connected_source = None
+        fallback = None
+        fallback_source = None
+
+        for cand in _alias_candidates(self._oauth_provider_name):
+            integration = get_integration(tenant_id, cand)
+            if integration is None:
+                continue
+            if integration.status == IntegrationStatus.connected and connected is None:
+                connected = integration
+                connected_source = cand
+            elif fallback is None:
+                fallback = integration
+                fallback_source = cand
+
+        if connected is not None:
+            return connected, connected_source
+        return fallback, fallback_source
+
     async def _try_tenant_token(self, tenant_id: str) -> dict:
         """
         테넌트 OAuth 토큰을 조회·검증한다.
@@ -86,11 +141,10 @@ class BaseMCPConnector(ABC):
                 — 연동 정보 없거나 disconnected 상태
         """
         from app.models.tenant_integration import IntegrationStatus
-        from app.repositories.tenant_integration_repo import get_integration
         from app.services.oauth.token_crypto import decrypt_token
 
         provider = self._oauth_provider_name
-        integration = get_integration(tenant_id, provider)
+        integration, source_provider = self._resolve_tenant_integration(tenant_id)
 
         if integration is None or integration.status == IntegrationStatus.disconnected:
             return self._skipped("tenant_integration_not_connected")
@@ -117,12 +171,16 @@ class BaseMCPConnector(ABC):
             return self._failed("tenant_token_decryption_failed")
 
         logger.info(
-            "_try_tenant_token OK tenant_id=%s provider=%s — real execute TODO",
-            tenant_id, provider,
+            "_try_tenant_token OK tenant_id=%s provider=%s source=%s — real execute TODO",
+            tenant_id, provider, source_provider or provider,
         )
         return self._skipped(
             "tenant_token_found_but_real_execute_not_implemented",
-            {"tenant_id": tenant_id, "provider": provider},
+            {
+                "tenant_id": tenant_id,
+                "provider": provider,
+                "source_provider": source_provider or provider,
+            },
         )
 
     async def _refresh_tenant_token(self, integration) -> object | None:
