@@ -27,6 +27,25 @@ _TIME_RE = re.compile(
     r"(오전|오후|저녁|아침|점심|새벽)?\s*(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?"
 )
 
+# 한국어 시간 숫자 → 아라비아. 뒤에 "시" 따라오는 경우만 변환 ("네명" 등 비-시간 컨텍스트 보호).
+_KOREAN_HOUR_MAP = {
+    "열두": 12, "열한": 11, "열": 10,
+    "아홉": 9, "여덟": 8, "일곱": 7, "여섯": 6, "다섯": 5,
+    "네": 4, "세": 3, "두": 2, "한": 1,
+}
+_KOREAN_HOUR_RE = re.compile(
+    r"(열두|열한|열|아홉|여덟|일곱|여섯|다섯|네|세|두|한)(?=\s*시)"
+)
+
+
+def _normalize_korean_hour(text: str) -> str:
+    """'오후세시' → '오후3시' 등 한국어 시간 숫자를 아라비아로 변환.
+
+    STT 가 한국어 숫자로 출력하는 경우 (e.g. '세시', '다섯시') _TIME_RE 매칭 보장.
+    뒤에 "시" 가 따라오는 경우만 변환 — '네명/세 사람' 등은 그대로.
+    """
+    return _KOREAN_HOUR_RE.sub(lambda m: str(_KOREAN_HOUR_MAP[m.group(1)]), text)
+
 
 def _resolve_relative_day(keyword: str, today: date) -> date:
     return today + timedelta(
@@ -90,6 +109,8 @@ def extract_absolute_datetime(
     """
     if today is None:
         today = date.today()
+
+    text = _normalize_korean_hour(text)
 
     target_date: date | None = None
     weekday_m = _WEEK_WEEKDAY_RE.search(text)

@@ -126,6 +126,12 @@ def build_system_prompt(tenant_name: str, tenant_industry: str) -> str:
   → rewritten_query: "사용자가 [제안 내용]에 동의함" (is_clear=true)
 - 직전 AI 가 일반 정보 안내였고 사용자: "네/아니요" → 의도 모호 (is_clear=false)
 
+※ 짧은 호응 ("네"/"응"/"예"/"좋아요") 뒤에 직전 AI 가 제안한 동작어 ("보내주세요"/"진행해주세요"/"예약해주세요") 가 붙은 하이브리드 발화도 새 task 가 아니라 **직전 제안에 대한 동의 + 동작 재확인** 으로 본다.
+- 직전 AI: "예약 확인 문자를 보내드릴까요?" 사용자: "네 보내주세요"
+  → rewritten_query: "사용자가 예약 확인 문자 발송에 동의함" (is_clear=true)
+- 직전 AI: "5월 11일 오후 3시 가능합니다, 진행해드릴까요?" 사용자: "네 진행해주세요"
+  → rewritten_query: "사용자가 5월 11일 오후 3시 예약 진행에 동의함" (is_clear=true)
+
 [핵심 규칙 4 — 음성 오타 추정 (STT 오류 보정)]
 사용자 발화는 음성 인식(STT) 결과라 발음 비슷한 단어가 잘못 인식됐을 수 있다.
 이 {label} 자주 쓰는 용어 ({facility_hint} 또는 영업/예약/문의 등) 와 발음이

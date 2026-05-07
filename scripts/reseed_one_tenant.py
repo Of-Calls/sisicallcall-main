@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 # SIP 번호 → (industry, pdf 파일명) 매핑.
 SIP_TO_INFO: dict[str, tuple[str, str]] = {
-    "1": ("finance", "financial_service_guide.pdf"),  # 금융
+    "1": ("finance", "sisicallcall_bank_guide.pdf"),  # 금융
     "3": ("restaurant", "store_maual.pdf"),  # 한밭식당
     "5": ("hospital", "hospital_manual.pdf"),  # 병원
     "4": ("government", "district_office_manual.pdf"),  # 강남구청
