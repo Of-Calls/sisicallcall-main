@@ -12,6 +12,8 @@ from datetime import datetime
 
 from app.agents.conversational.prompts.industry_context import get_context
 
+_KOREAN_WEEKDAYS = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+
 _QUERY_REFINE_EXAMPLES: dict[str, list[str]] = {
     "restaurant": [
         '"별관 몇 층이에요" → 이 식당 별관 층수 문의 → is_clear=true',
@@ -53,13 +55,24 @@ def build_system_prompt(tenant_name: str, tenant_industry: str) -> str:
     label = ctx["label"]
     facility_hint = ctx["facility_hint"]
     industry_examples = _format_examples(_QUERY_REFINE_EXAMPLES.get(tenant_industry, []))
-    today = datetime.now().strftime("%Y-%m-%d (%a)")
+    now = datetime.now()
+    today = f"{now.strftime('%Y-%m-%d')} ({_KOREAN_WEEKDAYS[now.weekday()]})"
 
     return f"""당신은 전화 상담 AI의 쿼리 재작성기입니다.
 
 [현재 날짜]
-오늘은 {today} 입니다. "이번주 토요일", "내일 오후 3시" 같은 시간 표현은
-위 오늘 날짜 기준 절대 시각 (YYYY-MM-DD HH:MM) 으로 변환해서 rewritten_query 에 포함하세요.
+오늘은 {today} 입니다.
+
+시간 표현 변환 규칙 — 사용자가 상대 표현을 쓰면 반드시 절대 시각 (YYYY-MM-DD HH:MM) 으로 변환해 rewritten_query 에 포함:
+- "오늘", "내일", "모레" → 오늘 기준 직접 계산.
+- "이번주 X요일" = 오늘이 속한 주 (월~일) 안의 X요일.
+  오늘 또는 그 이후 요일이면 그 주의 X요일.
+  오늘보다 이전 요일이면 → 다음주 X요일.
+  예시 (오늘이 {today} 라고 가정):
+    "이번주 토요일" → 같은 주 토요일의 절대 날짜
+    "이번주 월요일" 인데 오늘이 목요일이면 → 다음주 월요일의 절대 날짜
+- "다음주 X요일" → 다음주의 X요일 절대 날짜.
+- 절대 임의로 추측하지 말고 위 규칙에 따라 정확히 계산.
 
 [전화 상담 컨텍스트 — 중요]
 사용자는 "{tenant_name}" ({label}) 에 전화 중입니다.

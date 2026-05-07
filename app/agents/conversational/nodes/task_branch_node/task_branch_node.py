@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 from app.agents.conversational.state import CallState
 from app.agents.conversational.tool_catalog import (
@@ -15,17 +16,33 @@ _auth_session_svc = AuthSessionService()
 _call_session_svc = RedisSessionService()
 _HISTORY_TURN_LIMIT = 6
 
+_KOREAN_WEEKDAYS = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+
+
+def _today_label() -> str:
+    """task/humanize prompt 에 주입할 '오늘' 라벨 — 'YYYY-MM-DD (요일)'."""
+    now = datetime.now()
+    return f"{now.strftime('%Y-%m-%d')} ({_KOREAN_WEEKDAYS[now.weekday()]})"
+
+
 _POLITE_NO_TOOLS = "이 매장은 자동 업무 처리가 지원되지 않아요. 매장으로 직접 문의해주세요."
 _POLITE_AUTH = "본인 인증이 필요한 작업이에요. 인증 진행해드릴까요?"
 _POLITE_BLOCKED = "본인 인증이 여러 번 실패해 더 이상 진행이 어려워요. 상담원으로 연결해드릴게요."
 _POLITE_MISSING_INFO = "처리에 필요한 정보를 조금 더 알려주시겠어요?"
 _POLITE_TOOL_FAILED = "처리 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나 매장으로 문의해주세요."
 
-_SELECT_SYSTEM_PROMPT = """당신은 매장 전화 상담 AI 의 업무 처리 도구 선택기입니다.
+_SELECT_SYSTEM_PROMPT_TEMPLATE = """당신은 매장 전화 상담 AI 의 업무 처리 도구 선택기입니다.
+
+[현재 날짜] {today}
 
 [지침]
 - 사용자 요청에 가장 잘 맞는 도구를 선택해 호출하세요. 인자가 부족해도 일단 호출하세요 — 시스템이 부족한 인자나 인증 필요 여부를 처리합니다.
 - 환각 금지 — 사용자가 명시하지 않은 시간/번호/이름을 추측해서 채우지 마세요. 모르면 빈 문자열로 두세요.
+- 시간 인자 처리 (매우 중요):
+  · [재작성된 의도] 에 이미 절대 날짜 (YYYY-MM-DD HH:MM 형식) 가 있으면 그 값을 **글자 그대로** args 에 넣으세요.
+    사용자 발화의 요일 표현 ("이번주 토요일" 등) 과 다르더라도 [재작성된 의도] 의 절대 날짜를 신뢰합니다.
+    날짜를 임의로 다시 계산하지 마세요.
+  · [재작성된 의도] 에 절대 날짜가 없고 사용자 발화에만 상대 표현이 있으면, [현재 날짜] 기준으로 계산해서 절대 날짜로 채우세요.
 - 도구로 처리할 수 없는 요청 (예약/조회/문자 같은 도구 작업이 아닌 일반 안내) 일 때만 호출 없이 "이 작업은 매장으로 직접 문의 부탁드려요" 라고 답하세요. 따옴표/머릿말 금지."""
 
 _ASK_MISSING_SYSTEM_PROMPT = """당신은 매장 전화 상담 AI 입니다.
@@ -36,12 +53,17 @@ _ASK_MISSING_SYSTEM_PROMPT = """당신은 매장 전화 상담 AI 입니다.
 - 친절한 어조 ("혹시", "죄송하지만" 같은 부드러운 표현)
 - 한 문장만. 따옴표/머릿말 금지."""
 
-_HUMANIZE_SYSTEM_PROMPT = """당신은 매장 전화 상담 AI 입니다. MCP 도구 호출 결과를 사용자에게 친절한 음성 안내로 전달하세요.
+_HUMANIZE_SYSTEM_PROMPT_TEMPLATE = """당신은 매장 전화 상담 AI 입니다. MCP 도구 호출 결과를 사용자에게 친절한 음성 안내로 전달하세요.
+
+[현재 날짜] {today}
 
 [지침]
 - 한두 문장으로 자연스럽게.
 - 결과 데이터에 있는 사실만 사용. 없는 정보 추측 금지.
 - "도구", "API" 같은 메타 표현 금지. 매장 직원처럼 응답.
+- 음성 출력이므로 URL/링크/마크다운 ([텍스트](URL))/이메일/event_id 등 내부 식별자 절대 출력 금지.
+- 결과 데이터의 날짜는 사실로 받아들이세요. 결과 데이터의 날짜와 사용자 발화의 요일이 다르면 결과 데이터를 신뢰하고, 그 날짜의 실제 요일을 [현재 날짜] 기준으로 직접 계산하세요.
+- 결과 데이터의 날짜가 'YYYY-MM-DD HH:MM' 형식이면 음성 친화적 한국어 ("5월 8일 금요일 오후 3시") 로 변환해서 안내하세요.
 - 출력은 응답 텍스트만. 따옴표/머릿말 금지."""
 
 
@@ -113,7 +135,7 @@ async def humanize_tool_result(query: str, action_type: str, mcp_result: dict) -
     )
     try:
         text = await _llm.generate(
-            system_prompt=_HUMANIZE_SYSTEM_PROMPT,
+            system_prompt=_HUMANIZE_SYSTEM_PROMPT_TEMPLATE.format(today=_today_label()),
             user_message=user_message,
             temperature=0.2,
             max_tokens=200,
@@ -144,7 +166,7 @@ async def task_branch_node(state: CallState) -> dict:
 
     try:
         result = await _llm.generate_with_tools(
-            system_prompt=_SELECT_SYSTEM_PROMPT,
+            system_prompt=_SELECT_SYSTEM_PROMPT_TEMPLATE.format(today=_today_label()),
             user_message=user_message,
             tools=tools,
             temperature=0.1,
