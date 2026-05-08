@@ -1,14 +1,11 @@
 """
-KDT-101: MCP_EXECUTION_MODE 분기 테스트.
+KDT-101: Post-call ActionExecutor MCP-only 라우팅 테스트.
 
-direct / mcp / mcp_with_fallback 모드에 따라 ActionExecutor 가
-- direct mode: 기존 registry handler 만 호출
-- mcp mode: MCPGatewayConnector 만 호출 (direct connector 호출 금지)
-- mcp_with_fallback: gateway 가 transport error 일 때만 direct fallback
+ActionExecutor 는 항상 MCPGatewayConnector 만 호출하고, registry direct
+handler 는 절대 호출하지 않는다. transport 오류라도 direct fallback 하지
+않으며, status=failed 로 기록된다.
 
-을 보장하는지 확인한다.
-
-외부 API 는 호출하지 않는다 — gateway / handler 는 fake 로 주입한다.
+외부 API 는 호출하지 않는다 — gateway 는 fake 로 주입한다.
 """
 from __future__ import annotations
 
@@ -27,24 +24,6 @@ def _action(tool="slack", action_type="send_slack_alert", **extra) -> dict:
     return base
 
 
-class FakeHandler:
-    def __init__(self, *, status="success", external_id="ext-direct", result=None, error=None):
-        self.status = status
-        self.external_id = external_id
-        self.result = result or {}
-        self.error = error
-        self.calls: list[dict] = []
-
-    async def execute(self, action, *, call_id, tenant_id=""):
-        self.calls.append({"action": action, "call_id": call_id, "tenant_id": tenant_id})
-        return {
-            "status": self.status,
-            "external_id": self.external_id,
-            "result": self.result,
-            "error": self.error,
-        }
-
-
 class FakeGateway:
     def __init__(
         self,
@@ -56,7 +35,12 @@ class FakeGateway:
         self.result = result or {
             "status": "success",
             "external_id": "ext-mcp",
-            "result": {"source": "mcp_server", "via_mcp": True, "execution_mode": "mcp"},
+            "result": {
+                "source": "mcp_server",
+                "via_mcp": True,
+                "execution_mode": "mcp",
+                "mcp_tool": "slack.send_slack_alert",
+            },
         }
         self.raise_transport_err = raise_transport_err
         self.raise_other = raise_other
@@ -83,54 +67,15 @@ def _no_idempotency(monkeypatch):
     )
 
 
-# ── direct mode ──────────────────────────────────────────────────────────────
+# ── 1. ActionExecutor 는 MCPGatewayConnector 만 호출한다 ─────────────────────
 
 
-def test_direct_mode_uses_registry_handler(monkeypatch):
-    """MCP_EXECUTION_MODE=direct → registry handler.execute() 만 호출한다."""
-    monkeypatch.setenv("MCP_EXECUTION_MODE", "direct")
-
-    from app.agents.post_call.actions import executor as ex_mod
+def test_executor_always_routes_through_gateway(monkeypatch):
+    """ActionExecutor 가 direct registry / direct connector 를 손대지 않고
+    MCPGatewayConnector 만 호출함을 확인한다. direct registry 자체가 삭제된
+    상태이므로 import 가능성도 함께 검증한다."""
     from app.agents.post_call.actions.executor import ActionExecutor
 
-    fake_handler = FakeHandler(status="success", external_id="direct-id")
-    monkeypatch.setattr(
-        "app.agents.post_call.actions.executor.get_handler",
-        lambda tool: fake_handler,
-    )
-    fake_gateway = FakeGateway()
-    monkeypatch.setattr(
-        "app.services.mcp.connectors.mcp_gateway_connector.get_default_gateway",
-        lambda: fake_gateway,
-    )
-
-    executor = ActionExecutor()
-    result = asyncio.run(executor.execute_actions(
-        call_id="c-direct",
-        tenant_id="ten-1",
-        actions=[_action()],
-    ))
-
-    assert len(fake_handler.calls) == 1
-    assert len(fake_gateway.calls) == 0
-    assert result[0]["status"] == "success"
-    assert result[0]["external_id"] == "direct-id"
-
-
-# ── mcp mode ─────────────────────────────────────────────────────────────────
-
-
-def test_mcp_mode_uses_gateway_only(monkeypatch):
-    """MCP_EXECUTION_MODE=mcp → gateway 만 호출, direct handler 호출 금지."""
-    monkeypatch.setenv("MCP_EXECUTION_MODE", "mcp")
-
-    from app.agents.post_call.actions.executor import ActionExecutor
-
-    fake_handler = FakeHandler()
-    monkeypatch.setattr(
-        "app.agents.post_call.actions.executor.get_handler",
-        lambda tool: fake_handler,
-    )
     fake_gateway = FakeGateway(
         result={
             "status": "success",
@@ -158,26 +103,35 @@ def test_mcp_mode_uses_gateway_only(monkeypatch):
     ))
 
     assert len(fake_gateway.calls) == 1
-    assert len(fake_handler.calls) == 0, "direct handler MUST NOT be called in MCP mode"
     out = result[0]
     assert out["status"] == "success"
     assert out["external_id"] == "C12345:1700000000.000100"
     assert out["result"]["source"] == "mcp_server"
     assert out["result"]["via_mcp"] is True
     assert out["result"]["execution_mode"] == "mcp"
+    assert out["result"]["mcp_tool"] == "slack.send_slack_alert"
 
 
-def test_mcp_mode_transport_error_does_not_fallback(monkeypatch):
-    """MCP_EXECUTION_MODE=mcp → transport error 라도 direct fallback 금지."""
-    monkeypatch.setenv("MCP_EXECUTION_MODE", "mcp")
+def test_executor_does_not_import_registry_get_handler():
+    """executor 모듈은 더 이상 registry.get_handler 를 import 하지 않는다.
+    registry 모듈 자체가 MCP-only 전환과 함께 삭제되어 import 가 실패해야 한다.
+    """
+    import app.agents.post_call.actions.executor as ex_mod
 
+    assert not hasattr(ex_mod, "get_handler"), (
+        "executor 가 get_handler 를 import 하면 direct mode 잔재 — MCP-only 위반"
+    )
+
+    with pytest.raises(ModuleNotFoundError):
+        import app.agents.post_call.actions.registry  # noqa: F401
+
+
+# ── 2. MCP transport error 는 direct fallback 하지 않는다 ────────────────────
+
+
+def test_transport_error_returns_failed_without_fallback(monkeypatch):
     from app.agents.post_call.actions.executor import ActionExecutor
 
-    fake_handler = FakeHandler()
-    monkeypatch.setattr(
-        "app.agents.post_call.actions.executor.get_handler",
-        lambda tool: fake_handler,
-    )
     fake_gateway = FakeGateway(raise_transport_err=True)
     monkeypatch.setattr(
         "app.services.mcp.connectors.mcp_gateway_connector.get_default_gateway",
@@ -192,21 +146,21 @@ def test_mcp_mode_transport_error_does_not_fallback(monkeypatch):
     ))
 
     assert len(fake_gateway.calls) == 1
-    assert len(fake_handler.calls) == 0, "direct handler MUST NOT be called in MCP mode"
     assert result[0]["status"] == "failed"
-    assert "mcp_transport_failed" in result[0]["error"]
+    assert result[0]["error"].startswith("mcp_transport_failed")
+    res = result[0]["result"]
+    assert res["source"] == "mcp_server"
+    assert res["via_mcp"] is True
+    assert res["execution_mode"] == "mcp"
+    assert "transport_error" in res
 
 
-def test_mcp_mode_unknown_tool_returns_failed(monkeypatch):
-    monkeypatch.setenv("MCP_EXECUTION_MODE", "mcp")
+# ── 3. unknown MCP tool 은 즉시 failed ───────────────────────────────────────
 
+
+def test_unknown_tool_returns_failed_without_calling_gateway(monkeypatch):
     from app.agents.post_call.actions.executor import ActionExecutor
 
-    fake_handler = FakeHandler()
-    monkeypatch.setattr(
-        "app.agents.post_call.actions.executor.get_handler",
-        lambda tool: fake_handler,
-    )
     fake_gateway = FakeGateway()
     monkeypatch.setattr(
         "app.services.mcp.connectors.mcp_gateway_connector.get_default_gateway",
@@ -223,54 +177,20 @@ def test_mcp_mode_unknown_tool_returns_failed(monkeypatch):
     assert result[0]["status"] == "failed"
     assert result[0]["error"].startswith("unknown_mcp_tool")
     assert len(fake_gateway.calls) == 0
-    assert len(fake_handler.calls) == 0
+    res = result[0]["result"]
+    assert res["source"] == "mcp_server"
+    assert res["via_mcp"] is True
+    assert res["execution_mode"] == "mcp"
 
 
-# ── mcp_with_fallback ────────────────────────────────────────────────────────
+# ── 4. MCP tool-level failure 는 그대로 failed 전달 ──────────────────────────
 
 
-def test_mcp_with_fallback_falls_back_only_on_transport_error(monkeypatch):
-    monkeypatch.setenv("MCP_EXECUTION_MODE", "mcp_with_fallback")
-
+def test_tool_level_failure_propagates_without_fallback(monkeypatch):
+    """gateway 가 status=failed envelope 을 돌려주면 executor 도 그대로 failed —
+    direct fallback 같은 대체 경로 없음."""
     from app.agents.post_call.actions.executor import ActionExecutor
 
-    fake_handler = FakeHandler(status="success", external_id="fallback-id")
-    monkeypatch.setattr(
-        "app.agents.post_call.actions.executor.get_handler",
-        lambda tool: fake_handler,
-    )
-    fake_gateway = FakeGateway(raise_transport_err=True)
-    monkeypatch.setattr(
-        "app.services.mcp.connectors.mcp_gateway_connector.get_default_gateway",
-        lambda: fake_gateway,
-    )
-
-    executor = ActionExecutor()
-    result = asyncio.run(executor.execute_actions(
-        call_id="c-fb",
-        tenant_id="ten-1",
-        actions=[_action()],
-    ))
-
-    assert len(fake_gateway.calls) == 1
-    assert len(fake_handler.calls) == 1, "direct fallback should run when transport fails"
-    assert result[0]["status"] == "success"
-    assert result[0]["external_id"] == "fallback-id"
-    assert result[0]["result"]["source"] == "direct_fallback"
-    assert result[0]["result"]["execution_mode"] == "mcp_with_fallback"
-
-
-def test_mcp_with_fallback_does_not_fallback_on_tool_failure(monkeypatch):
-    """Gateway 가 정상적으로 status=failed 를 돌려주면 direct fallback 하지 않는다."""
-    monkeypatch.setenv("MCP_EXECUTION_MODE", "mcp_with_fallback")
-
-    from app.agents.post_call.actions.executor import ActionExecutor
-
-    fake_handler = FakeHandler(status="success", external_id="fallback-id")
-    monkeypatch.setattr(
-        "app.agents.post_call.actions.executor.get_handler",
-        lambda tool: fake_handler,
-    )
     fake_gateway = FakeGateway(
         result={
             "status": "failed",
@@ -280,6 +200,7 @@ def test_mcp_with_fallback_does_not_fallback_on_tool_failure(monkeypatch):
                 "source": "mcp_server",
                 "via_mcp": True,
                 "execution_mode": "mcp",
+                "mcp_tool": "slack.send_slack_alert",
             },
         }
     )
@@ -290,25 +211,23 @@ def test_mcp_with_fallback_does_not_fallback_on_tool_failure(monkeypatch):
 
     executor = ActionExecutor()
     result = asyncio.run(executor.execute_actions(
-        call_id="c-fb-2",
+        call_id="c-tool-fail",
         tenant_id="ten-1",
         actions=[_action()],
     ))
 
     assert len(fake_gateway.calls) == 1
-    assert len(fake_handler.calls) == 0, "tool-level failure must not trigger direct fallback"
     assert result[0]["status"] == "failed"
     assert result[0]["error"] == "slack_http_error:500"
     assert result[0]["result"]["source"] == "mcp_server"
+    assert result[0]["result"]["mcp_tool"] == "slack.send_slack_alert"
 
 
-# ── idempotency 보존 ─────────────────────────────────────────────────────────
+# ── 5. idempotency skip 은 유지 + MCP metadata 태깅 ─────────────────────────
 
 
-def test_idempotency_skip_still_applied_in_mcp_mode(monkeypatch):
-    """MCP mode 라도 이미 성공한 action 은 skipped already_succeeded 로 단축."""
-    monkeypatch.setenv("MCP_EXECUTION_MODE", "mcp")
-
+def test_idempotency_skip_short_circuits_gateway(monkeypatch):
+    """이미 성공한 action 은 gateway 호출 없이 skipped already_succeeded."""
     from app.agents.post_call.actions.executor import ActionExecutor
 
     async def already_done(call_id, action_type, tool):
@@ -318,11 +237,6 @@ def test_idempotency_skip_still_applied_in_mcp_mode(monkeypatch):
         already_done,
     )
 
-    fake_handler = FakeHandler()
-    monkeypatch.setattr(
-        "app.agents.post_call.actions.executor.get_handler",
-        lambda tool: fake_handler,
-    )
     fake_gateway = FakeGateway()
     monkeypatch.setattr(
         "app.services.mcp.connectors.mcp_gateway_connector.get_default_gateway",
@@ -339,4 +253,39 @@ def test_idempotency_skip_still_applied_in_mcp_mode(monkeypatch):
     assert result[0]["status"] == "skipped"
     assert result[0]["error"] == "already_succeeded"
     assert len(fake_gateway.calls) == 0
-    assert len(fake_handler.calls) == 0
+    # idempotency-skip row 도 mcp_action_logs.response_payload 에 MCP metadata
+    # 가 남아 발표용 SQL (source=mcp_server) 에서 일관되게 잡힌다.
+    res = result[0]["result"]
+    assert res["idempotency"] == "already_succeeded"
+    assert res["previous_external_id"] == "prev-id"
+    assert res["source"] == "mcp_server"
+    assert res["via_mcp"] is True
+    assert res["execution_mode"] == "mcp"
+    assert res["mcp_tool"] == "slack.send_slack_alert"
+
+
+# ── 6. MCP_EXECUTION_MODE 환경변수는 ActionExecutor 동작에 영향이 없다 ─────
+
+
+def test_mcp_execution_mode_env_is_ignored(monkeypatch):
+    """과거 direct/mcp_with_fallback 분기를 위해 쓰던 env 가 set 돼 있어도
+    ActionExecutor 는 항상 MCPGatewayConnector 로만 라우팅한다."""
+    monkeypatch.setenv("MCP_EXECUTION_MODE", "direct")
+
+    from app.agents.post_call.actions.executor import ActionExecutor
+
+    fake_gateway = FakeGateway()
+    monkeypatch.setattr(
+        "app.services.mcp.connectors.mcp_gateway_connector.get_default_gateway",
+        lambda: fake_gateway,
+    )
+
+    executor = ActionExecutor()
+    result = asyncio.run(executor.execute_actions(
+        call_id="c-env-direct",
+        tenant_id="ten-1",
+        actions=[_action()],
+    ))
+
+    assert len(fake_gateway.calls) == 1, "MCP-only: env 와 무관하게 gateway 만 호출"
+    assert result[0]["status"] == "success"

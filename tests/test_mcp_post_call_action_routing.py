@@ -157,26 +157,12 @@ def test_gateway_propagates_skipped_envelope():
 
 
 def test_executor_in_mcp_mode_routes_through_gateway(monkeypatch):
-    """ActionExecutor 가 MCP mode 에서 진짜로 gateway 를 통해서만 동작하는 통합 흐름.
+    """ActionExecutor 가 진짜로 gateway 를 통해서만 동작하는 통합 흐름.
 
-    direct registry handler 가 호출되지 않음을 다시 확인한다 — handler.execute()
-    가 호출되면 RuntimeError 를 던지도록 sentinel 핸들러를 등록한다.
+    direct registry 모듈은 MCP-only 전환과 함께 삭제됐으므로 executor 가
+    그쪽을 호출할 가능성 자체가 없다.
     """
-    monkeypatch.setenv("MCP_EXECUTION_MODE", "mcp")
-
     from app.agents.post_call.actions.executor import ActionExecutor
-
-    class _PoisonHandler:
-        async def execute(self, action, *, call_id, tenant_id=""):
-            raise RuntimeError(
-                "direct handler MUST NOT be called in MCP mode "
-                f"(action={action.get('action_type')})"
-            )
-
-    monkeypatch.setattr(
-        "app.agents.post_call.actions.executor.get_handler",
-        lambda tool: _PoisonHandler(),
-    )
 
     fake_client = _FakeProtocolClient({
         "action_type": "send_slack_alert",

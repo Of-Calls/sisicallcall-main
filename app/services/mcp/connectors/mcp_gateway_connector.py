@@ -1,16 +1,16 @@
 """
-MCPGatewayConnector — MCP mode 의 유일한 진입점.
+MCPGatewayConnector — Post-call action 실행의 유일한 진입점.
 
-Action Handler 가 ``MCP_EXECUTION_MODE=mcp`` 또는 ``mcp_with_fallback``
-일 때 호출하는 게이트웨이. 내부에서는 절대로 SlackConnector / GmailConnector
-같은 direct connector 를 호출하지 않고, ``MCPProtocolClient`` 를 통해
-별도 process 로 실행 중인 MCP Server 의 tool 을 호출한다.
+Post-call ActionExecutor 가 호출하는 게이트웨이. 내부에서는 절대로
+SlackConnector / GmailConnector 같은 direct connector 를 호출하지 않고,
+``MCPProtocolClient`` 를 통해 별도 process 로 실행 중인 자체 MCP Server
+의 tool 을 호출한다.
 
-  Action Executor / Action Handler
+  Action Executor
   → MCPGatewayConnector.execute()
   → MCPProtocolClient.call_tool(mcp_tool_name, payload)
   → stdio transport
-  → MCP Server (별도 process)
+  → 자체 MCP Server (별도 process)
   → MCP Server tool
   → 외부 provider 실행
 
@@ -20,7 +20,6 @@ action_skipped 로 변환할 수 있는 표준 dict — connectors/base.BaseMCPC
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from app.services.mcp.protocol_client import (
@@ -161,18 +160,6 @@ def get_default_gateway() -> MCPGatewayConnector:
     if _default_gateway is None:
         _default_gateway = MCPGatewayConnector()
     return _default_gateway
-
-
-def execution_mode() -> str:
-    """MCP_EXECUTION_MODE 정규화. direct / mcp / mcp_with_fallback 중 하나."""
-    raw = (os.getenv("MCP_EXECUTION_MODE", "direct") or "direct").strip().lower()
-    if raw in ("direct", "mcp", "mcp_with_fallback"):
-        return raw
-    return "direct"
-
-
-def is_mcp_mode_enabled() -> bool:
-    return execution_mode() != "direct"
 
 
 def is_transport_error(exc: BaseException) -> bool:

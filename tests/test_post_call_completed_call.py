@@ -679,34 +679,6 @@ async def test_demo_all_actions_standard_format(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_demo_slack_failure_does_not_stop_others(monkeypatch):
-    """Slack 실패가 Calendar/SMS/Notion 실행을 막지 않는다."""
-    from app.agents.post_call.actions.executor import execute_actions
-    from app.agents.post_call.actions.registry import register, unregister
-
-    class ExplodingSlack:
-        async def execute(self, action, *, call_id, tenant_id=""):
-            raise RuntimeError("Slack 의도적 폭발")
-
-    register("slack_demo_fail", ExplodingSlack())
-    try:
-        actions = [
-            {"action_type": "send_slack_alert",          "tool": "slack_demo_fail", "params": {}, "status": "pending"},
-            {"action_type": "schedule_callback",         "tool": "calendar",        "params": {}, "status": "pending"},
-            {"action_type": "send_callback_sms",         "tool": "sms",             "params": {"customer_phone": "01099990000"}, "status": "pending"},
-            {"action_type": "create_notion_call_record", "tool": "notion",          "params": {}, "status": "pending"},
-        ]
-        results = await execute_actions(call_id="slack-fail-demo", tenant_id="demo-tenant", actions=actions)
-        assert len(results) == 4
-        assert results[0]["status"] == "failed"   # slack 폭발
-        assert results[1]["status"] == "success"  # calendar ok
-        assert results[2]["status"] == "success"  # sms ok
-        assert results[3]["status"] == "success"  # notion ok
-    finally:
-        unregister("slack_demo_fail")
-
-
-@pytest.mark.asyncio
 async def test_demo_full_flow_with_mock_llm(monkeypatch):
     """demo context + mock LLM으로 전체 Post-call 플로우 실행 → executed_actions 검증."""
     from app.agents.post_call.completed_call_runner import run_post_call_for_completed_call

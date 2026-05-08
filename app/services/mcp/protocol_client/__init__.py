@@ -1,9 +1,12 @@
 """
 진짜 MCP protocol Client — KDT-101.
 
-기존 ``app/services/mcp/client.py`` (MCPClient) 는 Connector registry/router
-역할로 보존하고, 진짜 MCP Client 는 이 패키지에 둔다. 이름이 겹치지 않도록
-디렉터리명도 ``protocol_client`` 로 분리했다.
+Post-call ActionExecutor 는 MCP-only 다 — 이 패키지가 stdio transport 로
+자체 MCP Server 와 통신한다.
+
+기존 ``app/services/mcp/client.py`` (MCPClient + Connector registry) 는
+실시간 통화 흐름 (auth_branch_node / task_branch_node) 전용으로 보존되며,
+Post-call 경로에서는 호출되지 않는다.
 
 엔트리:
   from app.services.mcp.protocol_client.client import (

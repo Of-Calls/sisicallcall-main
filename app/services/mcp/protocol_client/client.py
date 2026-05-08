@@ -49,8 +49,8 @@ class MCPClientTransportError(RuntimeError):
     """MCP server process / stdio transport 가 실패했을 때만 발생.
 
     Tool 실행 결과 (status=failed) 는 정상 응답이므로 이 예외를 쓰지 않는다.
-    Action Executor 의 mcp_with_fallback 모드는 이 예외만 direct fallback 으로
-    처리한다.
+    MCP-only ActionExecutor 는 이 예외를 잡아 status=failed +
+    error=mcp_transport_failed:* 로 변환하며, direct fallback 은 하지 않는다.
     """
 
 
