@@ -324,6 +324,11 @@ async def call_ws(websocket: WebSocket):
 
                             print(f"[VAD] 침묵 임계 도달 — {len(audio_buffer)}B → STT")
 
+                            # 처리 lock 시작 — STT/graph/TTS 동안 사용자 audio 폐기.
+                            # 사용자가 응답 기다리며 다시 말해도 buffer 에 안 쌓임.
+                            # TTS 재생 끝 또는 빈 STT 분기에서 해제.
+                            is_speaking = True
+
                             t_stt = time.perf_counter()
                             transcript = await _stt.transcribe(bytes(audio_buffer))
                             stt_ms = (time.perf_counter() - t_stt) * 1000
@@ -475,6 +480,17 @@ async def call_ws(websocket: WebSocket):
                                         print(f"[HANGUP] Twilio call terminated: {twilio_call_sid}")
                                     except Exception as e:
                                         print(f"[HANGUP] failed: {e}")
+                            else:
+                                # 빈 STT 또는 stream_sid 없음 — 처리 lock 해제 + buffer 정리.
+                                # STT 동안 큐에 쌓였던 audio (재발화 등) 폐기 → 다음 turn 깨끗.
+                                print("[STT] 빈 결과 — buffer reset + lock 해제")
+                                audio_buffer.clear()
+                                pcm_buffer.clear()
+                                utterance_pcm.clear()
+                                ratecv_state = None
+                                silence_count = 0
+                                had_speech = False
+                                is_speaking = False
 
             elif event == "stop":
                 print("[WS] stop")
