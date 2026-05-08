@@ -82,6 +82,23 @@ def _notion_env_ready() -> tuple[bool, str | None]:
 
 # ── SMS / Solapi readiness ────────────────────────────────────────────────────
 
+_SMS_SENDER_ENV_ALIASES: tuple[str, ...] = (
+    "SOLAPI_FROM",
+    "SOLAPI_SENDER_NUMBER",
+    "SOLAPI_FROM_NUMBER",
+    "SMS_FROM",
+)
+
+
+def _resolve_sms_sender() -> str:
+    """발신번호를 _SMS_SENDER_ENV_ALIASES 순서대로 조회한다. 없으면 빈 문자열."""
+    for name in _SMS_SENDER_ENV_ALIASES:
+        val = (os.getenv(name) or "").strip()
+        if val:
+            return val
+    return ""
+
+
 def _sms_env_state() -> dict:
     """Solapi 서버 공통 env + customer_phone/SMS_TEST_TO 상태를 분해해서 보고한다.
 
@@ -89,10 +106,13 @@ def _sms_env_state() -> dict:
         {
           "solapi_installed":     bool,
           "credentials_present":  bool,   # SOLAPI_API_KEY + SOLAPI_API_SECRET 모두 있음
-          "sender_present":       bool,   # SOLAPI_FROM 또는 SOLAPI_SENDER_NUMBER
+          "sender_present":       bool,   # 아래 발신번호 alias 중 하나
           "test_to_present":      bool,   # SMS_TEST_TO 있음 (로컬/시연용 fallback)
           "missing":              list[str],
         }
+
+    발신번호 env 는 다음 alias 를 호환성 있게 처리한다 (순서 = 우선순위):
+        SOLAPI_FROM, SOLAPI_SENDER_NUMBER, SOLAPI_FROM_NUMBER, SMS_FROM
 
     SMS 는 OAuth provider 가 아니므로 tenant_integrations DB 에 row 가 없다.
     customer_phone 은 readiness 단계에서 알 수 없고 action 실행 시점에 결정된다.
@@ -106,11 +126,7 @@ def _sms_env_state() -> dict:
 
     api_key = (os.getenv("SOLAPI_API_KEY") or "").strip()
     api_secret = (os.getenv("SOLAPI_API_SECRET") or "").strip()
-    sender = (
-        os.getenv("SOLAPI_FROM")
-        or os.getenv("SOLAPI_SENDER_NUMBER")
-        or ""
-    ).strip()
+    sender = _resolve_sms_sender()
     test_to = (os.getenv("SMS_TEST_TO") or "").strip()
 
     missing: list[str] = []
@@ -121,7 +137,8 @@ def _sms_env_state() -> dict:
     if not api_secret:
         missing.append("SOLAPI_API_SECRET")
     if not sender:
-        missing.append("SOLAPI_FROM")
+        # 어떤 alias 라도 채우면 sender_present 가 된다는 사실을 미싱 메시지에 노출.
+        missing.append("SOLAPI_FROM(or " + "/".join(_SMS_SENDER_ENV_ALIASES[1:]) + ")")
 
     return {
         "solapi_installed":    installed,

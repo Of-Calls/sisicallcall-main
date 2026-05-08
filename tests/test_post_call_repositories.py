@@ -182,6 +182,45 @@ async def test_get_action_logs_by_call_id_for_tenant_filters_file_store():
 
 
 @pytest.mark.asyncio
+async def test_save_action_logs_preserves_mcp_metadata_in_response_payload():
+    """MCP mode executed_actions[].result 의 source/via_mcp/execution_mode/mcp_tool
+    이 mcp_action_logs.response_payload 로 손실 없이 저장돼야 한다.
+
+    이게 보장되어야 발표용 SQL 에서
+        response_payload->>'source' = 'mcp_server'
+    같은 검증이 의미 있다.
+    """
+    actions = [{
+        "action_type": "send_slack_alert",
+        "tool": "slack",
+        "status": "success",
+        "external_id": "C123:ts",
+        "error": None,
+        "result": {
+            "channel": "C123",
+            "ts": "ts",
+            "source": "mcp_server",
+            "via_mcp": True,
+            "execution_mode": "mcp",
+            "mcp_tool": "slack.send_slack_alert",
+            "mcp_latency_ms": 12,
+        },
+        "params": {"message": "x"},
+    }]
+    await save_action_logs("call-mcp-meta", "tenant-x", actions)
+
+    logs = await get_action_logs_by_call_id("call-mcp-meta")
+    assert len(logs) == 1
+    payload = logs[0]["response_payload"]
+    assert payload["source"] == "mcp_server"
+    assert payload["via_mcp"] is True
+    assert payload["execution_mode"] == "mcp"
+    assert payload["mcp_tool"] == "slack.send_slack_alert"
+    assert payload["channel"] == "C123"
+    assert payload["mcp_latency_ms"] == 12
+
+
+@pytest.mark.asyncio
 async def test_save_action_logs_appends_without_replacing():
     first = [{"action_type": "first_action", "tool": "company_db", "status": "success",
                "external_id": None, "error": None, "result": {}, "params": {}}]

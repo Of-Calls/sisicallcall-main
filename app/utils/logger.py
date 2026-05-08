@@ -192,6 +192,17 @@ def _ensure_root_file_handler() -> None:
     )
 
 
+def _is_mcp_stdio_mode() -> bool:
+    """MCP Server 가 stdio transport 로 실행 중인지 표시.
+
+    MCP_STDIO_MODE=true 일 때 stdout 은 JSON-RPC 전용이므로 일반 로그를
+    stderr 로 보낸다 (기본 level 도 WARNING 으로 상향). MCP Server entrypoint
+    (scripts/run_mcp_server.py, app/services/mcp/server/__main__.py 등) 가
+    project import 보다 먼저 이 env 를 set 한다.
+    """
+    return os.getenv("MCP_STDIO_MODE", "").lower() in ("1", "true")
+
+
 def get_logger(name: str) -> logging.Logger:
     _ensure_root_file_handler()
 
@@ -199,7 +210,11 @@ def get_logger(name: str) -> logging.Logger:
     if logger.handlers:
         return logger
 
-    handler = logging.StreamHandler(sys.stdout)
+    # stdio MCP mode 에서는 stdout 출력 금지 — JSON-RPC 프레이밍이 깨진다.
+    mcp_stdio = _is_mcp_stdio_mode()
+    stream = sys.stderr if mcp_stdio else sys.stdout
+
+    handler = logging.StreamHandler(stream)
     handler.setFormatter(
         _ColorFormatter(
             "%(asctime)s %(colored_level)s %(short_name)s │ %(message)s",
@@ -208,9 +223,36 @@ def get_logger(name: str) -> logging.Logger:
     )
     logger.addHandler(handler)
 
-    level = os.getenv("LOG_LEVEL", "INFO").upper()
+    if mcp_stdio:
+        # stdio mode 의 기본 level 은 WARNING — 너무 verbose 한 INFO 를 끈다.
+        # MCP_STDIO_LOG_LEVEL 로 override 가능 (디버그용 INFO/DEBUG).
+        level = os.getenv("MCP_STDIO_LOG_LEVEL", "WARNING").upper()
+    else:
+        level = os.getenv("LOG_LEVEL", "INFO").upper()
     logger.setLevel(getattr(logging, level, logging.INFO))
     # LOG_FILE 설정 시 루트의 파일 핸들러로 전달하기 위해 propagate=True,
     # 아니면 False 로 차단해 외부 라이브러리 핸들러와의 중복 출력을 방지.
     logger.propagate = bool(os.getenv("LOG_FILE"))
     return logger
+
+
+def reroute_existing_loggers_to_stderr() -> None:
+    """이미 만들어진 logger 들의 StreamHandler stream 을 stderr 로 옮긴다.
+
+    MCP_STDIO_MODE 가 import 시점보다 늦게 set 됐을 때 (예: 첫 import 가
+    이미 stdout 핸들러를 만든 상태에서 main() 진입) 안전망. 실제로는
+    scripts/run_mcp_server.py 에서 import 전에 set 하므로 거의 호출될 일이
+    없지만, 이중 안전.
+    """
+    seen: set[int] = set()
+    loggers = [logging.getLogger()]  # root
+    loggers.extend(logging.Logger.manager.loggerDict.values())  # type: ignore[arg-type]
+    for lg in loggers:
+        if not isinstance(lg, logging.Logger):
+            continue
+        if id(lg) in seen:
+            continue
+        seen.add(id(lg))
+        for h in lg.handlers:
+            if isinstance(h, logging.StreamHandler) and h.stream is sys.stdout:
+                h.stream = sys.stderr

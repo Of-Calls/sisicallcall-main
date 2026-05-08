@@ -38,12 +38,55 @@ class TestNormalizeProviderStatus:
         monkeypatch.setenv("SOLAPI_API_KEY", "key-x")
         monkeypatch.setenv("SOLAPI_API_SECRET", "secret-x")
         monkeypatch.setenv("SOLAPI_FROM", "01000000000")
+        monkeypatch.delenv("SOLAPI_SENDER_NUMBER", raising=False)
+        monkeypatch.delenv("SOLAPI_FROM_NUMBER", raising=False)
+        monkeypatch.delenv("SMS_FROM", raising=False)
         monkeypatch.delenv("SMS_TEST_TO", raising=False)
 
         result = normalize_provider_status("sms", None)
         assert result["status"] == "configured"
         # SMS is "ready" at provider level; per-action it requires customer_phone too.
         assert result["ready"] is True
+
+    @pytest.mark.parametrize(
+        "sender_env",
+        ["SOLAPI_FROM", "SOLAPI_SENDER_NUMBER", "SOLAPI_FROM_NUMBER", "SMS_FROM"],
+    )
+    def test_sms_provider_configured_via_each_sender_alias(self, monkeypatch, sender_env):
+        """SMS readiness 는 발신번호 alias 4종 중 어떤 하나만 있어도 configured."""
+        from scripts.check_post_call_integrations import normalize_provider_status
+
+        monkeypatch.setenv("SOLAPI_API_KEY", "key-x")
+        monkeypatch.setenv("SOLAPI_API_SECRET", "secret-x")
+        # 모든 alias 를 한 번 비운 뒤 대상 한 개만 채운다.
+        for name in ("SOLAPI_FROM", "SOLAPI_SENDER_NUMBER", "SOLAPI_FROM_NUMBER", "SMS_FROM"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv("SMS_TEST_TO", raising=False)
+        monkeypatch.setenv(sender_env, "01000000000")
+
+        result = normalize_provider_status("sms", None)
+        assert result["status"] == "configured", (
+            f"sender alias {sender_env}=01000000000 should make SMS configured "
+            f"but got {result}"
+        )
+        assert result["ready"] is True
+
+    def test_sms_provider_missing_when_no_sender_alias(self, monkeypatch):
+        """credential 만 있고 발신번호 alias 가 모두 비어 있으면 missing."""
+        from scripts.check_post_call_integrations import normalize_provider_status
+
+        monkeypatch.setenv("SOLAPI_API_KEY", "key-x")
+        monkeypatch.setenv("SOLAPI_API_SECRET", "secret-x")
+        for name in ("SOLAPI_FROM", "SOLAPI_SENDER_NUMBER", "SOLAPI_FROM_NUMBER", "SMS_FROM"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv("SMS_TEST_TO", raising=False)
+
+        result = normalize_provider_status("sms", None)
+        assert result["status"] == "missing"
+        assert result["ready"] is False
+        # reason 은 "solapi_sender_missing" 또는 (테스트 환경에 solapi 가
+        # 없을 때) "solapi_not_installed" 두 가지 모두 허용.
+        assert result["reason"] in {"solapi_sender_missing", "solapi_not_installed"}
 
     def test_notion_provider_missing_when_env_unset(self, monkeypatch):
         """Notion은 env 기반 — token/db_id 미설정이면 missing."""
@@ -580,7 +623,9 @@ class TestSmsProviderStatus:
     def _clear_sms_env(self, monkeypatch):
         for key in (
             "SOLAPI_API_KEY", "SOLAPI_API_SECRET",
-            "SOLAPI_FROM", "SOLAPI_SENDER_NUMBER", "SMS_TEST_TO",
+            "SOLAPI_FROM", "SOLAPI_SENDER_NUMBER",
+            "SOLAPI_FROM_NUMBER", "SMS_FROM",
+            "SMS_TEST_TO",
         ):
             monkeypatch.delenv(key, raising=False)
 
