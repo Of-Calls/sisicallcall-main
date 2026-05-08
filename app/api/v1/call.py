@@ -136,7 +136,10 @@ async def _run_conversational_graph(
     should_hangup = bool(result.get("should_hangup", False))
     print(f"[GRAPH] intent={graph_intent} resp='{graph_resp[:60]}' hangup={should_hangup} ({graph_ms:.0f}ms)")
     if graph_resp:
+        print("[DIAG] append_turn 시작")
         await _session.append_turn(call_id, transcript, graph_resp)
+        print("[DIAG] append_turn 끝")
+    print("[DIAG] _run_conversational_graph return")
     return graph_resp, graph_intent, should_hangup
 
 
@@ -367,8 +370,10 @@ async def call_ws(websocket: WebSocket):
                                 graph_intent: str | None = None
                                 should_hangup = False
                                 if graph_task is not None:
+                                    print("[DIAG] graph_task await 진입")
                                     try:
                                         graph_resp, graph_intent, should_hangup = await graph_task
+                                        print("[DIAG] graph_task await 복귀")
                                         if graph_resp:
                                             response_text = graph_resp
                                         else:
@@ -379,6 +384,7 @@ async def call_ws(websocket: WebSocket):
                                 # Stage 4c-2 — transcripts INSERT 양방향 (TTS 송출 전).
                                 # DB 실패해도 통화 지속 (DB 누락만, traceback 명시).
                                 if db_call_id:
+                                    print("[DIAG] transcripts INSERT 시작")
                                     try:
                                         await insert_transcript(
                                             db_call_id, turn_index, "customer", transcript,
@@ -388,12 +394,14 @@ async def call_ws(websocket: WebSocket):
                                             response_path=_intent_to_response_path(graph_intent),
                                         )
                                         turn_index += 1
+                                        print("[DIAG] transcripts INSERT 끝")
                                     except Exception as exc:
                                         print(f"[DB] transcripts INSERT 실패 (통화 지속): {type(exc).__name__}: {exc}")
                                         traceback.print_exc()
 
                                 # TTS synth — 실패 시 polite fallback 멘트로 1회 재시도, 그것도 실패면 silent skip.
                                 tts_audio = b""
+                                print("[DIAG] TTS synth 진입 직전")
                                 try:
                                     t_tts = time.perf_counter()
                                     tts_audio = await _tts.synthesize(response_text)

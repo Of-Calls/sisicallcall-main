@@ -118,13 +118,6 @@ class Settings(BaseSettings):
     auth_enable_test_register: bool = False
     auth_web_base_url: str = "http://localhost:3000"
 
-    # Vision (정수기 모델 분류 — TorchScript 단일 파일)
-    # metadata JSON 안에 input_size, normalize_mean/std, classes 정의.
-    # device="auto" 시 cuda 가능하면 cuda, 아니면 cpu 자동 선택.
-    vision_model_path: str = "models/water_purifier_convnextv2_femto_scripted.pt"
-    vision_metadata_path: str = "models/water_purifier_convnextv2_femto_metadata.json"
-    vision_device: str = "auto"
-
     # FAQ 시맨틱 캐시 (faq_branch 전용)
     # ChromaDB L2 squared distance (BGE-M3 normalized, L2sq = 2(1-cos_sim)).
     # 0.04 (cos_sim ≥ 0.98) — 진단 결과 (8 paraphrase + 8 unrelated) 에서
