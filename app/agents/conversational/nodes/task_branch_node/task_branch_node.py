@@ -6,6 +6,11 @@ from app.agents.conversational.prompts.fallback_phrases import (
     get_contact_channel,
     get_inquiry_phrase,
 )
+from app.agents.conversational.prompts.task import (
+    build_ask_missing_prompt,
+    build_humanize_prompt,
+    build_select_prompt,
+)
 from app.agents.conversational.state import CallState
 from app.agents.conversational.tool_catalog import (
     get_available_actions,
@@ -31,13 +36,12 @@ def _today_label() -> str:
     return f"{now.strftime('%Y-%m-%d')} ({_KOREAN_WEEKDAYS[now.weekday()]})"
 
 
-_POLITE_AUTH = "본인 인증이 필요한 작업이에요. 인증 진행해드릴까요?"
+_POLITE_AUTH = (
+    "본인 인증이 필요한 작업이에요. 인증을 진행해드릴까요?"
+)
 _POLITE_BLOCKED = "본인 인증이 여러 번 실패해 더 이상 진행이 어려워요. 상담원으로 연결해드릴게요."
 _POLITE_MISSING_INFO = "처리에 필요한 정보를 조금 더 알려주시겠어요?"
 _POLITE_DECLINE_BOOKING = "네, 예약은 진행하지 않을게요. 더 필요하신게 있으실까요?"
-_POLITE_SMS_DECLINED = "네, 알겠습니다. 더 필요하신게 있으실까요?"
-_POLITE_SMS_SENT = "확인 문자 발송해드렸어요. 더 필요하신게 있으실까요?"
-_POLITE_SMS_FAILED = "확인 문자 발송에 문제가 생겼어요. 더 필요하신게 있으실까요?"
 
 
 def _polite_no_tools(industry: str) -> str:
@@ -48,9 +52,39 @@ def _polite_tool_failed(industry: str) -> str:
     return f"처리 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나 {get_inquiry_phrase(industry)}."
 
 
-def _format_schedule_complete(time_kor: str) -> str:
-    """예약 등록 성공 메시지 — 결정적 조립 (humanize 우회)."""
-    return f"{time_kor}에 예약이 완료되었습니다. 예약 확인 문자를 보내드릴까요?"
+def _format_schedule_complete(time_kor: str, sms_status: str) -> str:
+    """예약 등록 성공 메시지 — 결정적 조립 (humanize 우회).
+
+    sms_status: 'sent' = 확인 문자 자동 발송 성공 / 'failed' = 발송 실패.
+    """
+    base = f"{time_kor}에 예약이 완료되었습니다."
+    if sms_status == "sent":
+        return base + " 확인 문자도 발송해드렸어요. 더 필요하신게 있으실까요?"
+    return base + " 다만 확인 문자 발송에 문제가 생겼어요. 더 필요하신게 있으실까요?"
+
+
+async def _send_confirm_sms_inline(
+    call_id: str, tenant_id: str, sms_body: str
+) -> bool:
+    """예약 등록 완료 직후 자동 SMS 발송. 성공 여부 반환.
+
+    SMS_TEST_RECIPIENT env 가 있으면 customer_phone 자동 주입 (시연용).
+    """
+    arguments: dict = {"message": sms_body}
+    test_recipient = os.getenv("SMS_TEST_RECIPIENT", "")
+    if test_recipient:
+        arguments["customer_phone"] = test_recipient
+    try:
+        result = await mcp_client.call_tool(
+            "sms", "send_confirm_sms", arguments,
+            call_id=call_id, tenant_id=tenant_id,
+        )
+        ok = result.get("status") == "success"
+        print(f"[task_branch] auto SMS status={result.get('status')}")
+        return ok
+    except Exception as exc:
+        print(f"[task_branch] auto SMS 예외: {exc}")
+        return False
 
 
 def _build_sms_body(tenant_name: str, tenant_industry: str, time_kor: str) -> str:
@@ -135,52 +169,13 @@ def _format_check_response(result_data: dict) -> str:
         return f"{req_kor}{req_marker} 예약 가능합니다. 진행해드릴까요?"
     if status == "closed_day":
         if sug_kor:
-            return f"{req_kor}{req_marker} 휴무라 예약이 어려워요. 가까운 영업일 {sug_kor}{sug_marker} 어떠세요?"
+            return f"{req_kor}{req_marker} 휴무라 예약이 어려워요. 가장 빠른 예약 가능 시간은 {sug_kor}입니다. 진행해드릴까요?"
         return f"{req_kor}{req_marker} 휴무라 예약이 어려워요. 다른 날짜 알려주실 수 있을까요?"
     if status == "conflict":
         if sug_kor:
-            return f"{req_kor}{req_marker} 다른 예약이 있어요. 같은 날 {sug_kor}{sug_marker} 비어있는데 어떠세요?"
+            return f"{req_kor}{req_marker} 다른 예약이 있어요. 같은 날 {sug_kor} 예약 가능합니다. 진행해드릴까요?"
         return f"{req_kor}{req_marker} 다른 예약이 있어요. 다른 시간 알려주실 수 있을까요?"
     return _POLITE_MISSING_INFO
-
-_SELECT_SYSTEM_PROMPT_TEMPLATE = """당신은 매장 전화 상담 AI 의 업무 처리 도구 선택기입니다.
-
-[현재 날짜] {today}
-
-[지침]
-- 사용자 요청에 가장 잘 맞는 도구를 선택해 호출하세요. 인자가 부족해도 일단 호출하세요 — 시스템이 부족한 인자나 인증 필요 여부를 처리합니다.
-- 환각 금지 — 사용자가 명시하지 않은 시간/번호/이름을 추측해서 채우지 마세요. 모르면 빈 문자열로 두세요.
-- 시간 인자 처리 (매우 중요):
-  · [재작성된 의도] 앞에 "(날짜: YYYY-MM-DD HH:MM)" 형식 prefix (시간 포함) 가 있으면 그 값을 그대로 preferred_time 에 넣으세요. 임의 재계산 금지.
-  · [재작성된 의도] 앞에 "(날짜: YYYY-MM-DD)" 형식 prefix 만 있고 시간 정보가 없으면 → preferred_time 을 빈 문자열 ("") 로 두세요. 시스템이 사용자에게 시간을 묻습니다. 임의로 시간 채우지 마세요.
-  · prefix 가 없고 사용자 발화에 명확한 시각 ("오후 3시" 등) 이 있으면 [현재 날짜] 기준으로 절대 날짜+시간 으로 채우세요.
-  · prefix 도 없고 발화에 시각 표현 (X시, 오전/오후, 점심, 저녁 등) 도 없으면 preferred_time 을 빈 문자열로 두세요. 날짜만 있는 경우도 시간 부재이므로 빈 문자열로.
-- 도구로 처리할 수 없는 요청 (예약/조회/문자 같은 도구 작업이 아닌 일반 안내) 일 때만 호출 없이 "이 작업은 매장으로 직접 문의 부탁드려요" 라고 답하세요. 따옴표/머릿말 금지."""
-
-_ASK_MISSING_SYSTEM_PROMPT = """당신은 매장 전화 상담 AI 입니다.
-사용자가 요청한 작업에 필요한 정보가 일부 부족합니다.
-부족한 정보의 의미를 보고, 자연스러운 한국어 한 문장으로 사용자에게 물어보세요.
-
-[지침]
-- 친절한 어조 ("혹시", "죄송하지만" 같은 부드러운 표현)
-- 한 문장만. 따옴표/머릿말 금지."""
-
-_HUMANIZE_SYSTEM_PROMPT_TEMPLATE = """당신은 매장 전화 상담 AI 입니다. MCP 도구 호출 결과를 사용자에게 친절한 음성 안내로 전달하세요.
-
-[현재 날짜] {today}
-
-[지침]
-- 한두 문장으로 자연스럽게.
-- 결과 데이터에 있는 사실만 사용. 없는 정보 추측 금지.
-- "도구", "API" 같은 메타 표현 금지. 매장 직원처럼 응답.
-- 음성 출력이므로 URL/링크/마크다운 ([텍스트](URL))/이메일/event_id 등 내부 식별자 절대 출력 금지.
-- 결과 데이터의 날짜는 사실로 받아들이세요. 결과 데이터의 날짜와 사용자 발화의 요일이 다르면 결과 데이터를 신뢰하고, 그 날짜의 실제 요일을 [현재 날짜] 기준으로 직접 계산하세요.
-- 결과 데이터의 날짜가 'YYYY-MM-DD HH:MM' 형식이면 음성 친화적 한국어 ("5월 8일 금요일 오후 3시") 로 변환해서 안내하세요.
-- [코드 계산된 한국어 시각] 섹션이 있으면 그 표현 한 번만 그대로 안내에 사용하세요. 자체 요일/시각 계산 절대 금지. "내일", "다음 주 X요일", "2026년" 같은 추가 시간 표현/연도 절대 추가하지 말 것 — 코드 결과 한 표현만 깔끔하게 음성으로 자연스럽게.
-- 결과 데이터에 'action_label_kr' 같은 한국어 동사 라벨이 있으면 그 표현을 그대로 사용. 사용자 발화에 다른 단어 (예: '취소', '없애줘') 가 있어도 결과 데이터 라벨 우선.
-- 결과 데이터에 'name' 필드가 있으면 응답을 'X 고객님,' 으로 시작하세요 (예: '이희원 고객님, 신한카드 *5678 정지 처리가 완료되었습니다.'). 인증이 완료된 회원 작업은 이름을 부르며 시작하는 것이 자연스러움.
-- 출력은 응답 텍스트만. 따옴표/머릿말 금지."""
-
 
 def _format_user_message(rewritten: str, user_text: str, history: list) -> str:
     """LLM Function Calling 입력 포맷.
@@ -202,7 +197,11 @@ def _format_user_message(rewritten: str, user_text: str, history: list) -> str:
 
 
 async def ask_for_missing(
-    query: str, action_type: str, spec: dict, missing: list[str]
+    query: str,
+    action_type: str,
+    spec: dict,
+    missing: list[str],
+    tenant_industry: str = "",
 ) -> str:
     """누락된 required 인자에 대해 자연스러운 역질문 생성.
 
@@ -227,7 +226,7 @@ async def ask_for_missing(
     )
     try:
         text = await _llm.generate(
-            system_prompt=_ASK_MISSING_SYSTEM_PROMPT,
+            system_prompt=build_ask_missing_prompt(tenant_industry),
             user_message=user_message,
             temperature=0.2,
             max_tokens=80,
@@ -282,7 +281,7 @@ async def humanize_tool_result(
     )
     try:
         text = await _llm.generate(
-            system_prompt=_HUMANIZE_SYSTEM_PROMPT_TEMPLATE.format(today=_today_label()),
+            system_prompt=build_humanize_prompt(tenant_industry, _today_label()),
             user_message=user_message,
             temperature=0.2,
             max_tokens=200,
@@ -296,8 +295,8 @@ async def humanize_tool_result(
 async def _resume_schedule_callback(call_id: str, tenant_id: str, pending: dict) -> dict:
     """availability_confirmed 동의 후 schedule_callback 자동 재실행.
 
-    등록 성공 시: 결정적 완료 메시지 + SMS 본문 미리 조립 + pending(sms_offer) 저장.
-    실패 시: polite_tool_failed (pending 저장 X).
+    등록 성공 시: 확인 SMS 자동 발송 + 결정적 완료 메시지 (sent/failed 분기).
+    실패 시: polite_tool_failed.
     """
     arguments = pending.get("arguments") or {}
     user_text = pending.get("user_text", "")
@@ -336,41 +335,10 @@ async def _resume_schedule_callback(call_id: str, tenant_id: str, pending: dict)
         )
         return {"response_text": text}
 
+    # 예약 등록 직후 확인 문자 자동 발송 — 별도 동의 turn 없이 즉시 처리.
     sms_body = _build_sms_body(tenant_name, tenant_industry, time_kor)
-    await _call_session_svc.set_pending_task(call_id, {
-        "tool": "sms",
-        "action_type": "send_confirm_sms",
-        "arguments": {"message": sms_body},
-        "user_text": user_text,
-        "kind": "sms_offer",
-    })
-    print(f"[task_branch] sms_offer pending 저장 (등록 완료 후 SMS 제안)")
-    return {"response_text": _format_schedule_complete(time_kor)}
-
-
-async def _resume_sms_offer(call_id: str, tenant_id: str, pending: dict) -> dict:
-    """sms_offer 동의 후 send_confirm_sms 자동 발송."""
-    arguments = dict(pending.get("arguments") or {})
-    test_recipient = os.getenv("SMS_TEST_RECIPIENT", "")
-    if test_recipient:
-        arguments["customer_phone"] = test_recipient
-
-    try:
-        mcp_result = await mcp_client.call_tool(
-            "sms",
-            "send_confirm_sms",
-            arguments,
-            call_id=call_id,
-            tenant_id=tenant_id,
-        )
-    except Exception as exc:
-        print(f"[task_branch] sms_offer 발송 예외: {exc}")
-        return {"response_text": _POLITE_SMS_FAILED}
-
-    print(f"[task_branch] sms_offer mcp_result status={mcp_result.get('status')}")
-    if mcp_result.get("status") != "success":
-        return {"response_text": _POLITE_SMS_FAILED}
-    return {"response_text": _POLITE_SMS_SENT}
+    sms_ok = await _send_confirm_sms_inline(call_id, tenant_id, sms_body)
+    return {"response_text": _format_schedule_complete(time_kor, "sent" if sms_ok else "failed")}
 
 
 async def _force_check_then_confirm(
@@ -393,6 +361,11 @@ async def _force_check_then_confirm(
     enriched_args = dict(arguments)
     enriched_args["tenant_industry"] = tenant_industry
     enriched_args["tenant_name"] = tenant_name
+    # customer_phone — 캘린더 이벤트 description 에 노출 (시연 + audit 가시성).
+    # 시연용 SMS_TEST_RECIPIENT 자동 주입. 운영은 Twilio caller ID 로 교체.
+    test_recipient = os.getenv("SMS_TEST_RECIPIENT", "")
+    if test_recipient and not enriched_args.get("customer_phone"):
+        enriched_args["customer_phone"] = test_recipient
 
     try:
         avail_result = await mcp_client.call_tool(
@@ -426,7 +399,25 @@ async def _force_check_then_confirm(
         })
         return {"response_text": _format_check_response(result_data)}
 
-    # conflict / closed_day — 동의 단계 없이 안내만
+    # closed_day / conflict + 검증된 추천 슬롯 → pending 저장 (preferred_time 을 추천으로 swap).
+    # 사용자 "네" 한 마디로 추천 슬롯 자동 예약. fallback 흐름 답답함 제거.
+    suggestions = result_data.get("suggested_slots") or []
+    if suggestions:
+        swapped_args = dict(enriched_args)
+        swapped_args["preferred_time"] = suggestions[0]
+        await _call_session_svc.set_pending_task(call_id, {
+            "tool": "calendar",
+            "action_type": "schedule_callback",
+            "arguments": swapped_args,
+            "tenant_name": tenant_name,
+            "tenant_industry": tenant_industry,
+            "user_text": user_text,
+            "kind": "availability_confirmed",
+        })
+        print(f"[task_branch] {result_data.get('status')} + suggestion={suggestions[0]} → pending 저장")
+        return {"response_text": _format_check_response(result_data)}
+
+    # 추천 슬롯 없음 (만석) — 사용자에게 다른 시간/날짜 요청
     return {"response_text": _format_check_response(result_data)}
 
 
@@ -465,15 +456,10 @@ async def _direct_schedule(
         )
         return {"response_text": text}
 
+    # 예약 등록 직후 확인 문자 자동 발송 — _resume_schedule_callback 와 동일.
     sms_body = _build_sms_body(tenant_name, tenant_industry, time_kor)
-    await _call_session_svc.set_pending_task(call_id, {
-        "tool": "sms",
-        "action_type": "send_confirm_sms",
-        "arguments": {"message": sms_body},
-        "user_text": user_text,
-        "kind": "sms_offer",
-    })
-    return {"response_text": _format_schedule_complete(time_kor)}
+    sms_ok = await _send_confirm_sms_inline(call_id, tenant_id, sms_body)
+    return {"response_text": _format_schedule_complete(time_kor, "sent" if sms_ok else "failed")}
 
 
 async def task_branch_node(state: CallState) -> dict:
@@ -499,9 +485,6 @@ async def task_branch_node(state: CallState) -> dict:
             or "진행" in rewritten
             or _is_short_affirm(user_text)
         )
-        # kind 별 추가 키워드 (LLM 이 패턴 안 만들고 명시적 동작어로 rewrite 한 경우)
-        if not agreed and kind == "sms_offer":
-            agreed = "보내" in user_text or "발송" in decision_src
         # 거절어 우선 — "아니요 X로 해주세요" 같은 하이브리드 발화는 거절로 처리
         if explicit_decline:
             agreed = False
@@ -519,21 +502,9 @@ async def task_branch_node(state: CallState) -> dict:
             await _call_session_svc.clear_pending_task(call_id)
             print(f"[task_branch] availability_confirmed 다른 의도 → pending clear")
 
-        elif kind == "sms_offer":
-            if agreed:
-                await _call_session_svc.clear_pending_task(call_id)
-                return await _resume_sms_offer(call_id, tenant_id, pending)
-            if declined:
-                await _call_session_svc.clear_pending_task(call_id)
-                print(f"[task_branch] sms_offer 거절 → polite_sms_declined")
-                return {"response_text": _POLITE_SMS_DECLINED}
-            # 다른 의도 → pending clear 하고 정상 흐름
-            await _call_session_svc.clear_pending_task(call_id)
-            print(f"[task_branch] sms_offer 다른 의도 → pending clear")
-
-    # 1. 매장 가용 도구
-    available = await get_available_actions(tenant_id)
-    print(f"[task_branch] tenant={tenant_id} available={list(available.keys())}")
+    # 1. 매장 가용 도구 — OAuth + industry 화이트리스트 둘 다 통과한 것만 노출
+    available = await get_available_actions(tenant_id, tenant_industry)
+    print(f"[task_branch] tenant={tenant_id} industry={tenant_industry} available={list(available.keys())}")
 
     if not available:
         return {"response_text": _polite_no_tools(tenant_industry)}
@@ -544,12 +515,12 @@ async def task_branch_node(state: CallState) -> dict:
 
     try:
         result = await _llm.generate_with_tools(
-            system_prompt=_SELECT_SYSTEM_PROMPT_TEMPLATE.format(today=_today_label()),
+            system_prompt=build_select_prompt(tenant_industry, _today_label()),
             user_message=user_message,
             tools=tools,
             temperature=0.1,
             max_tokens=300,
-            tool_choice="required",  # LLM 이 인자 부족해도 무조건 tool_call → 게이트가 처리
+            tool_choice="auto",  # LLM 이 도구 부적합 판단 시 호출 안 하고 polite refuse 가능
         )
     except Exception as exc:
         print(f"[task_branch] LLM 실패: {exc}")
@@ -624,7 +595,7 @@ async def task_branch_node(state: CallState) -> dict:
     # 4. required 인자 사후 검증 (LLM 환각/생략 안전망)
     if missing:
         print(f"[task_branch] required 부족 missing={missing}")
-        text = await ask_for_missing(user_text, action_type, spec, missing)
+        text = await ask_for_missing(user_text, action_type, spec, missing, tenant_industry)
         return {"response_text": text}
 
     # 5a. schedule_callback 강제 2단계 — check_availability 먼저, pending_task 저장 후 동의 요청.

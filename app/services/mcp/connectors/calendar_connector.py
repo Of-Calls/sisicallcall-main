@@ -32,7 +32,7 @@ Calendar MCP Connector.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.services.mcp.connectors.base import BaseMCPConnector
 from app.utils.logger import get_logger
@@ -42,6 +42,7 @@ logger = get_logger(__name__)
 _CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3/calendars"
 _DEFAULT_TZ = "Asia/Seoul"
 _DEFAULT_DURATION_MIN = 30
+_KST = timezone(timedelta(hours=9))
 
 # (mon, tue, wed, thu, fri, sat, sun) — None 이면 휴무
 _INDUSTRY_BUSINESS_HOURS: dict[str, tuple] = {
@@ -90,6 +91,14 @@ def _get_business_hours(tenant_industry: str, weekday: int) -> tuple | None:
     """tenant_industry + 요일 (mon=0) → (open, close) 또는 None (휴무)."""
     hours = _INDUSTRY_BUSINESS_HOURS.get(tenant_industry, _GENERIC_BUSINESS_HOURS)
     return hours[weekday]
+
+
+def _format_phone(phone: str) -> str:
+    """01047722480 → 010-4772-2480 (시연 가시성). 형식 안 맞으면 원본 반환."""
+    s = phone.strip()
+    if len(s) == 11 and s.startswith("010") and s.isdigit():
+        return f"{s[:3]}-{s[3:7]}-{s[7:]}"
+    return s
 
 
 def _default_event_title(tenant_industry: str, tenant_name: str) -> str:
@@ -245,12 +254,28 @@ class CalendarConnector(BaseMCPConnector):
             params.get("tenant_industry", ""), params.get("tenant_name", "")
         )
 
-        description = ""
+        # 시연 + audit 가시성 — 등록 시각 / 사유 / 고객 전화 자동 조립.
+        # 캘린더 상세 화면에 그대로 노출되어 "지금 등록됨" 명확.
+        reason = ""
         for key in ("description", "reason", "callback_reason", "summary_short"):
             val = params.get(key)
             if val:
-                description = str(val)
+                reason = str(val)
                 break
+        if not reason:
+            reason = _INDUSTRY_TITLE.get(
+                params.get("tenant_industry", ""), _DEFAULT_TITLE
+            )
+        created_str = datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S")
+        description_lines = [
+            "[AI 자동 등록]",
+            f"등록 시각: {created_str} (KST)",
+            f"예약 사유: {reason}",
+        ]
+        customer_phone = (params.get("customer_phone") or "").strip()
+        if customer_phone:
+            description_lines.append(f"고객 전화: {_format_phone(customer_phone)}")
+        description = "\n".join(description_lines)
 
         tz = params.get("timezone", _DEFAULT_TZ)
         duration = int(os.getenv("CALENDAR_DEFAULT_DURATION_MIN", str(_DEFAULT_DURATION_MIN)))
@@ -320,10 +345,12 @@ class CalendarConnector(BaseMCPConnector):
         weekday = requested_dt.weekday()
         business_hours = _get_business_hours(tenant_industry, weekday)
 
-        # 휴무일 → events.list 생략, 가까운 영업일 추천
+        # 휴무일 → 다음 영업일들 검색 (events.list) → 첫 빈 슬롯 추천
         if business_hours is None:
-            next_open = self._find_next_open_day(requested_dt, tenant_industry)
-            suggestions = [self._format_iso(next_open)] if next_open else []
+            next_free = await self._find_next_free_slot_in_open_days(
+                access_token, requested_dt, tenant_industry, call_id=call_id
+            )
+            suggestions = [self._format_iso(next_free)] if next_free else []
             logger.info(
                 "CalendarConnector: closed_day call_id=%s requested=%s industry=%s suggest=%s",
                 call_id, preferred_str, tenant_industry, suggestions,
@@ -467,17 +494,92 @@ class CalendarConnector(BaseMCPConnector):
         candidates.sort(key=lambda dt: abs((dt - requested).total_seconds()))
         return candidates
 
-    def _find_next_open_day(
-        self, requested: datetime, tenant_industry: str
+    async def _find_next_free_slot_in_open_days(
+        self,
+        access_token: str,
+        requested: datetime,
+        tenant_industry: str,
+        *,
+        call_id: str,
     ) -> datetime | None:
-        """요청일 휴무 시 가까운 영업일의 영업 시작 시각 반환 (최대 7일 이내)."""
+        """요청일 휴무 시 가까운 영업일들 검색 → events.list → 영업시간 안 첫 빈 슬롯.
+
+        7일 이내 모든 영업일 만석이거나 영업일 없으면 None.
+        events.list 호출 1회 / 영업일 (최악 5회). API 실패 시 다음 영업일 시도.
+        """
+        import httpx
+
+        duration_min = int(os.getenv("CALENDAR_DEFAULT_DURATION_MIN", str(_DEFAULT_DURATION_MIN)))
+        calendar_id = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+        url = f"{_CALENDAR_API_BASE}/{calendar_id}/events"
+
         for offset in range(1, 8):
-            cand = requested + timedelta(days=offset)
-            bh = _get_business_hours(tenant_industry, cand.weekday())
-            if bh is not None:
-                open_str, _ = bh
-                h, m = map(int, open_str.split(":"))
-                return cand.replace(hour=h, minute=m, second=0, microsecond=0)
+            cand_day = (requested + timedelta(days=offset)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            bh = _get_business_hours(tenant_industry, cand_day.weekday())
+            if bh is None:
+                continue
+
+            open_str, close_str = bh
+            open_h, open_m = map(int, open_str.split(":"))
+            close_h, close_m = map(int, close_str.split(":"))
+            open_dt = cand_day.replace(hour=open_h, minute=open_m)
+            close_dt = cand_day.replace(hour=close_h, minute=close_m)
+
+            day_end = cand_day + timedelta(days=1)
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        params={
+                            "timeMin": cand_day.isoformat() + "+09:00",
+                            "timeMax": day_end.isoformat() + "+09:00",
+                            "singleEvents": "true",
+                            "orderBy": "startTime",
+                            "maxResults": "100",
+                        },
+                        timeout=15.0,
+                    )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "CalendarConnector: next-day events.list 오류 call_id=%s offset=%d status=%d",
+                        call_id, offset, resp.status_code,
+                    )
+                    continue
+                events = resp.json().get("items", []) or []
+            except Exception as exc:
+                logger.warning(
+                    "CalendarConnector: next-day events.list 예외 call_id=%s offset=%d err=%s",
+                    call_id, offset, type(exc).__name__,
+                )
+                continue
+
+            busy: list[tuple[datetime, datetime]] = []
+            for ev in events:
+                s_str = (ev.get("start") or {}).get("dateTime")
+                e_str = (ev.get("end") or {}).get("dateTime")
+                if not s_str or not e_str:
+                    continue
+                try:
+                    s_dt = datetime.fromisoformat(s_str)
+                    e_dt = datetime.fromisoformat(e_str)
+                except (ValueError, AttributeError):
+                    continue
+                if s_dt.tzinfo:
+                    s_dt = s_dt.replace(tzinfo=None)
+                if e_dt.tzinfo:
+                    e_dt = e_dt.replace(tzinfo=None)
+                busy.append((s_dt, e_dt))
+
+            # 영업 시작 시각 기준으로 가장 가까운 빈 슬롯 = 첫 빈 슬롯
+            free_slots = self._find_free_slots(
+                open_dt, close_dt, busy, open_dt, duration_min
+            )
+            if free_slots:
+                return free_slots[0]
+
         return None
 
     @staticmethod

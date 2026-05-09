@@ -38,13 +38,14 @@ logger = get_logger(__name__)
 
 # ── Finance tenant mock 회원 (시연용) ─────────────────────────────────────────
 # key = phone (= face_embeddings.customer_ref 와 동일 패턴)
+# 시연용 회원 (첫 번째) name/카드는 .env 로 override 가능 (DEMO_MEMBER_*).
 _FINANCE_MEMBERS: dict[str, dict] = {
-    "01047722480": {  # 희원 (실통화 SMS 수신 번호)
-        "name": "이희원",
-        "card_number_masked": "신한카드 *5678",
+    os.getenv("DEMO_MEMBER_PHONE", "01047722480"): {
+        "name": os.getenv("DEMO_MEMBER_NAME", "이희원"),
+        "card_number_masked": os.getenv("DEMO_MEMBER_CARD_MASKED", "신한카드 *5678"),
         "card_status": "normal",
     },
-    "01012345678": {  # 더미 (대조용)
+    "01012345678": {  # 더미 (대조용, 시연 안 씀)
         "name": "김철수",
         "card_number_masked": "국민카드 *1234",
         "card_status": "normal",

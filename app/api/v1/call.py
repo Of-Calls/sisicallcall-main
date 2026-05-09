@@ -184,8 +184,101 @@ async def call_ws(websocket: WebSocket):
     caller_number = ""
     # Stage 4c-2 — transcripts turn 카운터 (customer + agent 한 쌍이 같은 turn_index 공유)
     turn_index = 0
+    # Phase 2 — auth event listener task (verified/blocked/face_failed/ocr_failed → 자율 발화)
+    auth_listener_task: asyncio.Task | None = None
 
     try:
+        # ── Phase 2/3 inner 함수 — call_ws 의 local closure 캡처 ───────────────
+        async def _push_speak(text: str) -> None:
+            """Auth 이벤트로 트리거된 자율 발화. is_speaking flag 직렬화."""
+            nonlocal is_speaking, ratecv_state, silence_count, had_speech, turn_index
+            waited = 0.0
+            while is_speaking and waited < 30.0:
+                await asyncio.sleep(0.1)
+                waited += 0.1
+            if is_speaking:
+                print("[PUSH] is_speaking 30s 안 풀림 → skip")
+                return
+            is_speaking = True
+            try:
+                tts_audio = await _tts.synthesize(text)
+                print(f"[PUSH] synth out={len(tts_audio)}B '{text[:60]}'")
+                if tts_audio and stream_sid:
+                    await _send_audio_to_twilio(websocket, stream_sid, tts_audio)
+                    play_sec = len(tts_audio) / 8000
+                    await asyncio.sleep(play_sec)
+                    print(f"[PUSH] 재생 끝 ({play_sec:.2f}s)")
+                if stream_sid:
+                    try:
+                        await _session.append_turn(stream_sid, "", text)
+                    except Exception as exc:
+                        print(f"[PUSH] history append 실패: {exc}")
+                if db_call_id:
+                    try:
+                        await insert_transcript(
+                            db_call_id, turn_index, "agent", text, response_path="auth",
+                        )
+                        turn_index += 1
+                    except Exception as exc:
+                        print(f"[PUSH] DB INSERT 실패: {exc}")
+            except Exception as exc:
+                print(f"[PUSH] 발화 실패: {type(exc).__name__}: {exc}")
+            finally:
+                is_speaking = False
+                audio_buffer.clear()
+                pcm_buffer.clear()
+                utterance_pcm.clear()
+                ratecv_state = None
+                silence_count = 0
+                had_speech = False
+
+        async def _build_verified_response() -> str:
+            """verified 이벤트 → pending_task resume → humanize 응답 반환.
+
+            pending_task 가 없으면 generic fallback. resume 실패 시도 fallback.
+            """
+            from app.agents.conversational.nodes.auth_branch_node.auth_branch_node import (
+                _resume_pending_task,
+            )
+            pending = await _session.get_pending_task(stream_sid)
+            if not pending:
+                return "본인 인증이 완료되었습니다."
+            await _session.clear_pending_task(stream_sid)
+            try:
+                result = await _resume_pending_task(
+                    stream_sid, tenant_id, tenant_industry, pending,
+                )
+                return result.get("response_text", "본인 인증이 완료되었습니다.")
+            except Exception as exc:
+                print(f"[PUSH] resume_pending_task 실패: {type(exc).__name__}: {exc}")
+                return "본인 인증이 완료되었습니다."
+
+        async def _auth_event_listener(auth_id: str) -> None:
+            """auth_id 채널 구독 + 이벤트별 push 발화. verified/blocked 시 종료."""
+            from app.services.auth.events import subscribe_auth_events
+            print(f"[PUSH] listener 시작 auth_id={auth_id}")
+            try:
+                async for event in subscribe_auth_events(auth_id):
+                    event_type = event.get("event_type", "")
+                    print(f"[PUSH] event={event_type}")
+                    if event_type == "verified":
+                        text = await _build_verified_response()
+                        await _push_speak(text)
+                        break
+                    elif event_type == "face_failed":
+                        await _push_speak("얼굴 인증에 실패했어요. 다시 시도해주세요.")
+                    elif event_type == "blocked":
+                        await _push_speak(
+                            "여러 번 실패해서 더 이상 진행이 어려워요. 상담원으로 연결해드릴게요."
+                        )
+                        break
+                print(f"[PUSH] listener 종료 auth_id={auth_id}")
+            except asyncio.CancelledError:
+                print(f"[PUSH] listener cancelled auth_id={auth_id}")
+            except Exception as exc:
+                print(f"[PUSH] listener 예외: {type(exc).__name__}: {exc}")
+        # ──────────────────────────────────────────────────────────────────────
+
         while True:
             raw = await websocket.receive_text()
             msg = json.loads(raw)
@@ -324,6 +417,11 @@ async def call_ws(websocket: WebSocket):
 
                             print(f"[VAD] 침묵 임계 도달 — {len(audio_buffer)}B → STT")
 
+                            # 처리 lock 시작 — STT/graph/TTS 동안 사용자 audio 폐기.
+                            # 사용자가 응답 기다리며 다시 말해도 buffer 에 안 쌓임.
+                            # TTS 재생 끝 또는 빈 STT 분기에서 해제.
+                            is_speaking = True
+
                             t_stt = time.perf_counter()
                             transcript = await _stt.transcribe(bytes(audio_buffer))
                             stt_ms = (time.perf_counter() - t_stt) * 1000
@@ -416,6 +514,19 @@ async def call_ws(websocket: WebSocket):
                                         print(f"[DB] transcripts INSERT 실패 (통화 지속): {type(exc).__name__}: {exc}")
                                         traceback.print_exc()
 
+                                # Phase 2 — auth listener spawn (intent=auth + auth_id 발급된 시점, 한 통화 1회).
+                                # auth_branch_node._create_new_auth 가 SMS 발송 + set_auth_id 후 응답 반환.
+                                # 이 시점에 listener 띄워두면 사용자 폰 인증 완료 직후 자율 발화 가능.
+                                if graph_intent == "auth" and (
+                                    auth_listener_task is None or auth_listener_task.done()
+                                ):
+                                    spawned_auth_id = await _session.get_auth_id(stream_sid)
+                                    if spawned_auth_id:
+                                        auth_listener_task = asyncio.create_task(
+                                            _auth_event_listener(spawned_auth_id)
+                                        )
+                                        print(f"[PUSH] listener spawned auth_id={spawned_auth_id}")
+
                                 # TTS synth — 실패 시 polite fallback 멘트로 1회 재시도, 그것도 실패면 silent skip.
                                 tts_audio = b""
                                 print("[DIAG] TTS synth 진입 직전")
@@ -475,9 +586,23 @@ async def call_ws(websocket: WebSocket):
                                         print(f"[HANGUP] Twilio call terminated: {twilio_call_sid}")
                                     except Exception as e:
                                         print(f"[HANGUP] failed: {e}")
+                            else:
+                                # 빈 STT 또는 stream_sid 없음 — 처리 lock 해제 + buffer 정리.
+                                # STT 동안 큐에 쌓였던 audio (재발화 등) 폐기 → 다음 turn 깨끗.
+                                print("[STT] 빈 결과 — buffer reset + lock 해제")
+                                audio_buffer.clear()
+                                pcm_buffer.clear()
+                                utterance_pcm.clear()
+                                ratecv_state = None
+                                silence_count = 0
+                                had_speech = False
+                                is_speaking = False
 
             elif event == "stop":
                 print("[WS] stop")
+                if auth_listener_task and not auth_listener_task.done():
+                    auth_listener_task.cancel()
+                    print("[PUSH] listener cancelled (stop)")
                 if stream_sid:
                     _verifier.cleanup(stream_sid)
                     voiceprint_enrollment.cleanup(stream_sid)
@@ -506,6 +631,9 @@ async def call_ws(websocket: WebSocket):
 
     except WebSocketDisconnect:
         print("[WS] 연결 끊김 (사용자/Twilio)")
+        if auth_listener_task and not auth_listener_task.done():
+            auth_listener_task.cancel()
+            print("[PUSH] listener cancelled (disconnect)")
         if stream_sid:
             _verifier.cleanup(stream_sid)
             voiceprint_enrollment.cleanup(stream_sid)
@@ -534,6 +662,9 @@ async def call_ws(websocket: WebSocket):
         # traceback 을 stdout 으로 명시 출력해 logs/{date}/stdout_*.log 에 잡히게.
         print(f"[WS] 비정상 종료: {type(exc).__name__}: {exc}")
         traceback.print_exc()
+        if auth_listener_task and not auth_listener_task.done():
+            auth_listener_task.cancel()
+            print("[PUSH] listener cancelled (error)")
         if stream_sid:
             try:
                 _verifier.cleanup(stream_sid)

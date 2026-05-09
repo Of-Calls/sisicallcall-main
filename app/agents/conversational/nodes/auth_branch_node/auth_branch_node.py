@@ -11,7 +11,7 @@ from app.services.auth.session import AuthSessionService
 from app.services.mcp.client import mcp_client
 from app.services.session.redis_session import RedisSessionService
 from app.services.sms import get_sms_service
-from app.utils.config import settings
+from app.utils.auth_sms import build_face_auth_sms
 
 _auth_session_svc = AuthSessionService()
 _call_session_svc = RedisSessionService()
@@ -20,9 +20,11 @@ _sms_svc = get_sms_service()
 _POLITE_SMS_FAILED = "인증 링크 발송에 문제가 생겼어요. 잠시 후 다시 시도해주세요."
 _POLITE_SMS_SENT = (
     "본인 인증을 위해 휴대폰으로 인증 링크를 보내드렸어요. "
-    "링크를 열어 인증을 완료해주세요."
+    "얼굴 인증을 진행해주세요."
 )
-_POLITE_IN_PROGRESS = "본인 인증을 진행 중이에요. 휴대폰에서 인증을 완료해주세요."
+_POLITE_IN_PROGRESS = (
+    "아직 인증이 진행되지 않았어요. SMS 링크를 확인해주세요."
+)
 _POLITE_VERIFIED = "인증이 완료됐어요. 어떤 도움이 필요하신가요?"
 _POLITE_BLOCKED = "인증이 여러 번 실패해 차단됐어요. 상담원으로 연결해드릴게요."
 
@@ -45,8 +47,8 @@ async def _create_new_auth(call_id: str, tenant_id: str, customer_phone: str) ->
     )
     print(f"[auth_branch] 세션 생성 auth_id={auth_id}")
 
-    auth_url = f"{settings.auth_web_base_url}/auth/{auth_id}"
-    sms_body = f"[시시콜콜] 본인인증을 위해 아래 링크를 열어주세요.\n{auth_url}"
+    # 얼굴 인증 페이지 단독 — 1단계 인증 (OCR 단계 제거됨).
+    sms_body = build_face_auth_sms(auth_id)
     sent = await _sms_svc.send_sms(to=customer_phone, body=sms_body)
     print(f"[auth_branch] SMS 발송 sent={sent} to={customer_phone}")
 
@@ -74,8 +76,8 @@ async def _resume_pending_task(
     user_text = pending.get("user_text", "")
     print(f"[auth_branch] pending_task 자동 재실행 action={action_type} args={arguments}")
 
-    # spec 재조회 — 매장 도구 disconnect 같은 edge case 안전망.
-    available = await get_available_actions(tenant_id)
+    # spec 재조회 — 매장 도구 disconnect / industry 화이트리스트 변경 같은 edge case 안전망.
+    available = await get_available_actions(tenant_id, tenant_industry)
     spec = available.get(action_type)
     if spec is None:
         print(f"[auth_branch] pending action={action_type} 카탈로그 없음 → polite_verified")
@@ -85,7 +87,7 @@ async def _resume_pending_task(
     missing = [k for k in required if not arguments.get(k)]
     if missing:
         print(f"[auth_branch] resume args 부족 missing={missing} → ask_for_missing")
-        text = await ask_for_missing(user_text, action_type, spec, missing)
+        text = await ask_for_missing(user_text, action_type, spec, missing, tenant_industry)
         return {"response_text": text}
 
     try:
@@ -139,7 +141,7 @@ async def auth_branch_node(state: CallState) -> dict:
             return {"response_text": _POLITE_VERIFIED}
         if status == "blocked":
             return {"response_text": _POLITE_BLOCKED}
-        # pending / liveness_pending / liveness_passed / 그 외 → 진행 중 안내
+        # 진행 중 — 1단계 인증이라 부분 통과 분기 없음.
         return {"response_text": _POLITE_IN_PROGRESS}
 
     # ② 신규 진입 — D-A 와 동일

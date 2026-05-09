@@ -15,6 +15,7 @@ from app.schemas.auth import (
     LivenessInstructionsResponse,
 )
 from app.services.auth.arcface import ArcFaceAuthService
+from app.services.auth.events import publish_auth_event
 from app.services.auth.liveness import LivenessService
 from app.services.auth.session import AuthSessionService
 from app.services.sms import get_sms_service
@@ -130,6 +131,12 @@ async def verify_face(auth_id: str, file: UploadFile = File(...)):
         await _session_svc.set_blocked(auth_id)
         logger.warning("얼굴 인증 최대 재시도 초과 → 차단 auth_id=%s", auth_id)
         raise HTTPException(status_code=403, detail="인증 실패 — 상담원 연결로 전환됩니다")
+
+    # 단일 실패 (재시도 가능) — Phase 1 pub/sub
+    await publish_auth_event(auth_id, "face_failed", {
+        "similarity": round(max(similarity, 0.0), 4),
+        "attempts_remaining": remaining,
+    })
 
     return FaceVerifyResponse(
         auth_id=auth_id,

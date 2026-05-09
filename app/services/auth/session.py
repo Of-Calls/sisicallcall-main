@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 
+from app.services.auth.events import publish_auth_event
 from app.utils.config import settings
 from app.utils.logger import get_logger
 
@@ -62,10 +63,14 @@ class AuthSessionService:
         return await self._redis.hincrby(_key(auth_id), "face_attempts", 1)
 
     async def set_face_verified(self, auth_id: str) -> None:
+        # 1단계 인증 — face 통과 = verified.
         await self._redis.hset(_key(auth_id), mapping={
             "face_verified": "true",
             "status": "verified",
         })
+        # Phase 1 pub/sub — listener 가 자율 발화 트리거
+        await publish_auth_event(auth_id, "verified")
 
     async def set_blocked(self, auth_id: str) -> None:
         await self._redis.hset(_key(auth_id), "status", "blocked")
+        await publish_auth_event(auth_id, "blocked")
