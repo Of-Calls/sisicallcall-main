@@ -1,12 +1,11 @@
-"""TenantIntegrationRepository — DB mode + storage routing 테스트.
+"""TenantIntegrationRepository — DB-only 단위 테스트.
 
-DB mode 는 실제 Postgres 연결을 만들지 않는다. ``asyncpg.connect`` 를 mock 해서
-SQL 인자/쿼리 모양만 검증한다. 통합 테스트는 운영 DB 가 살아있는 환경에서
-별도로 수행 (수동 검증 명령 참고).
+DB 백엔드 1종 (Postgres) 만 지원한다. 실제 Postgres 연결은 만들지 않고
+``asyncpg.connect`` 를 mock 해서 SQL 인자/쿼리 모양만 검증한다. 통합
+테스트는 운영 DB 가 살아있는 환경에서 별도로 수행한다 (수동 검증).
 """
 from __future__ import annotations
 import re
-import asyncio
 import json
 import os
 import sys
@@ -67,37 +66,18 @@ def _patch_asyncpg(conn):
     )
 
 
-# ── 1. storage routing ───────────────────────────────────────────────────────
+# ── 1. clear_integrations 는 db mode 에서 no-op ───────────────────────────────
 
-class TestStorageRouting:
-    def test_unknown_storage_falls_back_to_memory(self, monkeypatch):
-        from app.repositories.tenant_integration_repo import TenantIntegrationRepository
-
-        repo = TenantIntegrationRepository(storage="totally-unknown")
-        assert repo.storage == "memory"
-
-    def test_explicit_db_storage(self):
-        from app.repositories.tenant_integration_repo import TenantIntegrationRepository
-
-        repo = TenantIntegrationRepository(storage="db")
-        assert repo.storage == "db"
-
-    def test_env_db_storage(self, monkeypatch):
-        monkeypatch.setenv("TENANT_INTEGRATION_STORAGE", "db")
-        from app.repositories.tenant_integration_repo import TenantIntegrationRepository
-
-        repo = TenantIntegrationRepository()
-        assert repo.storage == "db"
-
-    def test_clear_integrations_is_noop_in_db_mode(self):
+class TestClearIntegrations:
+    def test_clear_integrations_is_noop(self):
         """db mode 에서 운영 데이터를 일괄 삭제하지 않는다."""
         from app.repositories.tenant_integration_repo import TenantIntegrationRepository
 
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
         repo.clear_integrations()  # raises 없이 끝나야 함
 
 
-# ── 2. DB mode upsert ─────────────────────────────────────────────────────────
+# ── 2. DB upsert ──────────────────────────────────────────────────────────────
 
 class TestDbUpsert:
     def test_upsert_calls_insert_on_conflict_with_jsonb_casts(self):
@@ -105,7 +85,7 @@ class TestDbUpsert:
 
         conn = _mock_conn()
         conn.fetchrow.return_value = _row(provider="slack", scopes=json.dumps(["chat:write"]))
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
 
         ti = TenantIntegration(
             tenant_id="00000000-0000-0000-0000-000000000010",
@@ -148,7 +128,7 @@ class TestDbUpsert:
 
         conn = _mock_conn()
         conn.fetchrow.return_value = _row(provider="slack", status="disconnected")
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
 
         ti = TenantIntegration(
             tenant_id="00000000-0000-0000-0000-000000000020",
@@ -164,7 +144,7 @@ class TestDbUpsert:
         assert "metadata = EXCLUDED.metadata" in sql_arg
 
 
-# ── 3. DB mode get / list ─────────────────────────────────────────────────────
+# ── 3. DB get / list ─────────────────────────────────────────────────────────
 
 class TestDbGetAndList:
     def test_get_filters_on_tenant_and_provider(self):
@@ -172,7 +152,7 @@ class TestDbGetAndList:
 
         conn = _mock_conn()
         conn.fetchrow.return_value = _row(provider="slack")
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
 
         with _patch_asyncpg(conn):
             integration = repo.get_integration(
@@ -191,7 +171,7 @@ class TestDbGetAndList:
 
         conn = _mock_conn()
         conn.fetchrow.return_value = None
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
 
         with _patch_asyncpg(conn):
             integration = repo.get_integration("tid-x", "slack")
@@ -206,7 +186,7 @@ class TestDbGetAndList:
             _row(provider="slack"),
             _row(provider="google_gmail"),
         ]
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
 
         with _patch_asyncpg(conn):
             rows = repo.list_integrations("00000000-0000-0000-0000-000000000040")
@@ -218,7 +198,7 @@ class TestDbGetAndList:
         assert "AND provider" not in sql_arg
 
 
-# ── 4. DB mode mark_disconnected ──────────────────────────────────────────────
+# ── 4. DB mark_disconnected ───────────────────────────────────────────────────
 
 class TestDbMarkDisconnected:
     def test_disconnect_returns_true_when_row_updated(self):
@@ -226,7 +206,7 @@ class TestDbMarkDisconnected:
 
         conn = _mock_conn()
         conn.execute.return_value = "UPDATE 1"
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
 
         with _patch_asyncpg(conn):
             ok = repo.mark_disconnected(
@@ -244,7 +224,7 @@ class TestDbMarkDisconnected:
 
         conn = _mock_conn()
         conn.execute.return_value = "UPDATE 0"
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
 
         with _patch_asyncpg(conn):
             ok = repo.mark_disconnected("tid-missing", "slack")
@@ -252,29 +232,48 @@ class TestDbMarkDisconnected:
         assert ok is False
 
 
-# ── 5. file mode 기존 동작 보존 ────────────────────────────────────────────────
+# ── 5. DB update_tokens ───────────────────────────────────────────────────────
 
-class TestFileModeStillWorks:
-    def test_file_mode_loads_existing_file(self, tmp_path, monkeypatch):
-        from app.models.tenant_integration import TenantIntegration as _TI
-        from app.repositories.tenant_integration_repo import (
-            TenantIntegrationRepository,
-            _to_dict,
-        )
+class TestDbUpdateTokens:
+    def test_update_tokens_sets_access_and_status(self):
+        from app.repositories.tenant_integration_repo import TenantIntegrationRepository
 
-        path = tmp_path / "ti.json"
-        ti = _TI(
-            tenant_id="tid-file", provider="slack",
-            access_token_encrypted="enc-x",
-        )
-        path.write_text(json.dumps({"tid-file::slack": _to_dict(ti)}), encoding="utf-8")
+        conn = _mock_conn()
+        conn.execute.return_value = "UPDATE 1"
+        repo = TenantIntegrationRepository()
 
-        monkeypatch.setenv("TENANT_INTEGRATION_FILE_PATH", str(path))
-        repo = TenantIntegrationRepository(storage="file")
+        new_expires = datetime.utcnow() + timedelta(hours=1)
+        with _patch_asyncpg(conn):
+            ok = repo.update_tokens(
+                "00000000-0000-0000-0000-000000000060", "google_gmail",
+                access_token_encrypted="enc-new",
+                refresh_token_encrypted="enc-refresh-new",
+                expires_at=new_expires,
+                status=IntegrationStatus.connected,
+            )
 
-        result = repo.get_integration("tid-file", "slack")
-        assert result is not None
-        assert result.access_token_encrypted == "enc-x"
+        assert ok is True
+        sql_arg = conn.execute.await_args.args[0]
+        assert "UPDATE tenant_integrations" in sql_arg
+        assert "access_token_encrypted = $3" in sql_arg
+        # refresh / expires_at 은 COALESCE 로 None 이면 기존 값 유지
+        assert "COALESCE($4, refresh_token_encrypted)" in sql_arg
+        assert "COALESCE($5, expires_at)" in sql_arg
+
+    def test_update_tokens_returns_false_when_no_row(self):
+        from app.repositories.tenant_integration_repo import TenantIntegrationRepository
+
+        conn = _mock_conn()
+        conn.execute.return_value = "UPDATE 0"
+        repo = TenantIntegrationRepository()
+
+        with _patch_asyncpg(conn):
+            ok = repo.update_tokens(
+                "tid-missing", "slack",
+                access_token_encrypted="enc-x",
+            )
+
+        assert ok is False
 
 
 # ── 6. logical field <-> DB column mapping ───────────────────────────────────
@@ -306,7 +305,7 @@ class TestLogicalFieldMapping:
 
         conn = _mock_conn()
         conn.fetchrow.return_value = _row()
-        repo = TenantIntegrationRepository(storage="db")
+        repo = TenantIntegrationRepository()
 
         ti = TenantIntegration(
             tenant_id="00000000-0000-0000-0000-000000000099",
@@ -332,22 +331,3 @@ class TestLogicalFieldMapping:
         assert not re.search(r"(?<!external_)account_email\b", sql_arg)
         # `config` 라는 단독 컬럼은 없어야 한다
         # (substring 검사가 아니라 토큰 단위. _DB_COLUMNS 검사로 충분)
-
-
-# ── 7. Repository singleton routing ──────────────────────────────────────────
-
-class TestSingletonRouting:
-    def test_module_singleton_respects_env_at_construction(self, monkeypatch):
-        """import 된 싱글턴은 import 시점의 env 를 기준으로 storage 를 결정한다.
-
-        새 storage 모드를 적용하려면 ``TenantIntegrationRepository(storage=...)`` 로
-        직접 인스턴스를 만들어 사용한다."""
-        from app.repositories.tenant_integration_repo import TenantIntegrationRepository
-
-        monkeypatch.setenv("TENANT_INTEGRATION_STORAGE", "db")
-        new_repo = TenantIntegrationRepository()
-        assert new_repo.storage == "db"
-
-        monkeypatch.setenv("TENANT_INTEGRATION_STORAGE", "memory")
-        mem_repo = TenantIntegrationRepository()
-        assert mem_repo.storage == "memory"

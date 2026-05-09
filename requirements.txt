@@ -101,6 +101,11 @@ kiwipiepy==0.23.1
 # post-call Agent
 typing_extensions
 
+# Timezone data — Windows 환경에서 zoneinfo.ZoneInfo("Asia/Seoul") 작동을 위해 필요.
+# Linux/macOS 는 시스템 tzdata 사용. analysis_planner_agent_node 에는 fixed-offset
+# fallback 도 있으나 (defense in depth) 일관된 ZoneInfo 동작을 위해 패키지 설치 권장.
+tzdata>=2024.1
+
 # OAuth token encryption (SaaS tenant integration)
 cryptography==41.0.7
 

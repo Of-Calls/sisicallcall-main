@@ -45,30 +45,28 @@ PostCallAgent (LangGraph)
 
 ### 3-1. 런타임 저장소 — `TenantIntegrationRepository`
 
-`app/repositories/tenant_integration_repo.py`는 **in-memory + 선택적
-JSON 파일** 저장소다. PostgreSQL은 현재 런타임에서 사용하지 않는다.
-
-| `TENANT_INTEGRATION_STORAGE` | 동작 |
-|---|---|
-| `memory` (기본값) | 프로세스 메모리에만 보관. 서버 재시작 시 소실 |
-| `file` | `TENANT_INTEGRATION_FILE_PATH` (기본 `.local/tenant_integrations.json`) JSON 파일에 persist |
+`app/repositories/tenant_integration_repo.py` 는 **Postgres `tenant_integrations`
+테이블만 사용**한다 (db-only). `TENANT_INTEGRATION_STORAGE` /
+`TENANT_INTEGRATION_FILE_PATH` 환경변수는 **불필요** — 더 이상 읽지 않는다.
 
 기동 시 다음과 같은 로그가 남는다.
 
 ```text
-TenantIntegrationRepo file mode path=.local\tenant_integrations.json loaded=0
+TenantIntegrationRepo db mode
 ```
 
-`loaded=0`은 **현재 tenant integration row가 0개**라는 뜻이다.
-OAuth를 한 번도 완료하지 않았거나, 다른 환경의 파일을 로드했을 때
-나타난다. → `missing` 상태로 표시되는 원인.
+`loaded=` 카운트는 더 이상 출력하지 않는다. tenant integration row 가 있는지
+확인하려면 §7 의 `python scripts/check_post_call_integrations.py --tenant-id <uuid>` 또는
+OAuth status endpoint 를 사용한다.
 
 ### 3-2. DB 스키마 (`db/init/11_tenant_integrations.sql`)
 
-테이블 정의는 존재하지만 **현재 코드는 이 테이블을 직접 사용하지 않는다.**
-PostgreSQL 전환 시 같은 인터페이스로 repository만 교체하기 위한 사전
-스키마다 (`tenant_integration_repo.py` 모듈 docstring의 "PostgreSQL
-전환 TODO" 참고).
+`tenant_integrations` 테이블은 단일 진실 소스다. 컬럼:
+`id, tenant_id, provider, status, scopes, access_token_encrypted,
+refresh_token_encrypted, token_type, expires_at, external_account_id,
+external_account_email, external_workspace_id, external_workspace_name,
+metadata, created_at, updated_at`. UNIQUE (tenant_id, provider) 로 OAuth
+재연동 시 ON CONFLICT 가지가 status / token / expires_at 을 갱신한다.
 
 ### 3-3. Token 암호화
 
@@ -189,9 +187,8 @@ OAuth 기반 real 실행이 명시적으로 구현된 connector는 **Slack
 # 토큰 암호화 (필수)
 TOKEN_ENCRYPTION_KEY=<Fernet key>
 
-# tenant_integrations 저장소
-TENANT_INTEGRATION_STORAGE=file
-TENANT_INTEGRATION_FILE_PATH=.local/tenant_integrations.json
+# tenant_integrations 저장소 — Postgres tenant_integrations 테이블 사용 (db-only).
+# 별도 storage 환경변수 없음. settings.database_url 만 유효하면 된다.
 
 # Post-call 연동 정책 (확인됨)
 MCP_USE_TENANT_OAUTH=true            # tenant OAuth 우선
@@ -260,8 +257,10 @@ COMPANY_DB_INTERNAL_TOKEN=
 ```
 
 > `.env.example`에는 현재 `SOLAPI_*`, `NOTION_*`, `TOKEN_ENCRYPTION_KEY`,
-> `TENANT_INTEGRATION_STORAGE`, `MCP_USE_TENANT_OAUTH`, `MCP_ALLOW_ENV_FALLBACK`
-> 같은 일부 변수가 누락되어 있다. 필요 시 후속 작업으로 보강 권장.
+> `MCP_USE_TENANT_OAUTH`, `MCP_ALLOW_ENV_FALLBACK` 같은 일부 변수가 누락되어 있다.
+> 필요 시 후속 작업으로 보강 권장.
+> (`TENANT_INTEGRATION_STORAGE` / `TENANT_INTEGRATION_FILE_PATH` 는 더 이상
+> 사용하지 않으므로 추가 불필요 — 자동 db 사용.)
 
 ---
 
@@ -362,7 +361,7 @@ python scripts/check_post_call_integrations.py --all-tenants
 [ ] OPENAI_API_KEY 설정 (real LLM 사용 시) 또는 mock 모드
 [ ] MCP_ACTION_LOG_STORE=db 설정
 [ ] TOKEN_ENCRYPTION_KEY 설정 (OAuth provider 사용 시)
-[ ] TENANT_INTEGRATION_STORAGE=file 설정 (재시작 후 토큰 유지하려면)
+[ ] DATABASE_URL / settings.database_url 이 유효한 Postgres 가리키는지 확인 (tenant_integrations 테이블 db-only)
 [ ] MCP_USE_TENANT_OAUTH=true (tenant OAuth 사용 시)
 [ ] MCP_ALLOW_ENV_FALLBACK 정책 결정 (true면 tenant 미연결 시 env 폴백)
 [ ] 사용할 provider 별 *_MCP_REAL=true 설정
@@ -778,9 +777,9 @@ real을 켰지만 OAuth/env 미충족이면 `success`가 아닌 `skipped` /
 
 ## 14. 후속 작업
 
-- `.env.example`에 `TOKEN_ENCRYPTION_KEY`, `TENANT_INTEGRATION_STORAGE`,
-  `TENANT_INTEGRATION_FILE_PATH`, `MCP_USE_TENANT_OAUTH`,
+- `.env.example`에 `TOKEN_ENCRYPTION_KEY`, `MCP_USE_TENANT_OAUTH`,
   `MCP_ALLOW_ENV_FALLBACK`, `NOTION_*`, `SOLAPI_*` 보강
+  (`TENANT_INTEGRATION_STORAGE` / `_FILE_PATH` 는 db-only 전환 후 제거됨)
 - Slack OAuth 실 메시지 발송 검증 (test workspace)
 - Calendar / Gmail / Jira tenant OAuth real-execute 구현 진행 (현재 skipped)
 - `tenant_integrations` 테이블 기반 PostgreSQL repository 전환

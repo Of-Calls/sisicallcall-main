@@ -9,6 +9,13 @@ demo context 특성:
 - critical priority → Slack, SMS, Notion 추가 유도
 - JIRA_MCP_REAL → Jira 이슈 생성 유도
 - POST_CALL_ENABLE_NOTION_RECORD → Notion call record 유도
+
+소비처:
+- scripts/run_post_call_demo.py
+- scripts/seed_demo_completed_call_db.py
+
+레거시 DEMO_LLM_* 상수들은 v2 리팩터(2-에이전트 그래프) 이후 모두 삭제됨 —
+신규 에이전트는 mock LLM 또는 monkeypatch 로 직접 응답을 주입한다.
 """
 from __future__ import annotations
 
@@ -44,65 +51,4 @@ DEMO_POST_CALL_CONTEXT: dict = {
         },
     ],
     "branch_stats": {"faq": 0, "task": 1, "escalation": 1},
-}
-
-# 시연용 LLM mock 반환값 — angry + escalated + critical + callback
-DEMO_LLM_SUMMARY = {
-    "summary_short": "[시연] 환불 지연 반복 문의 — 긴급 후속 조치 필요",
-    "summary_detailed": "[시연] 고객이 환불 지연으로 반복 문의를 했으며 강한 불만을 표현함. 결제/환불 담당팀 에스컬레이션과 오늘 중 담당자 콜백, 문자 안내를 요청함.",
-    "customer_intent": "환불 지연 확인 및 담당자 콜백 요청",
-    "customer_emotion": "angry",
-    "resolution_status": "escalated",
-    "keywords": ["환불 지연", "반복 문의", "콜백", "긴급 후속", "문자 안내"],
-    "handoff_notes": "환불 지연 반복 문의 건. 고객이 오늘 중 담당자 콜백과 처리 상황 문자 안내를 요청함.",
-}
-
-DEMO_LLM_VOC = {
-    "sentiment_result": {
-        "sentiment": "angry",
-        "intensity": 0.93,
-        "reason": "환불 지연과 반복 문의로 강한 불만을 표현함",
-    },
-    "intent_result": {
-        "primary_category": "환불/결제",
-        "sub_categories": ["환불 지연", "반복 문의", "담당자 콜백", "문자 안내"],
-        "is_repeat_topic": True,
-        "faq_candidate": False,
-    },
-    "priority_result": {
-        "priority": "critical",
-        "action_required": True,
-        "suggested_action": "환불 담당팀 에스컬레이션 후 오늘 중 콜백",
-        "reason": "반복 문의 + 환불 지연 + angry 감정 → 긴급 후속 조치 필요",
-    },
-}
-
-DEMO_LLM_PRIORITY = {
-    "priority": "critical",
-    "tier": "critical",
-    "action_required": True,
-    "suggested_action": "환불 담당팀 에스컬레이션 후 오늘 중 콜백",
-    "reason": "환불 지연 반복 문의와 강한 불만으로 긴급 후속 조치 필요",
-}
-
-# ── 통합 분석 mock (post_call_analysis_node 전용) ─────────────────────────────
-# DEMO_LLM_SUMMARY / DEMO_LLM_VOC / DEMO_LLM_PRIORITY 는 호환용으로 유지한다.
-DEMO_LLM_ANALYSIS = {
-    "summary": DEMO_LLM_SUMMARY,
-    "voc_analysis": DEMO_LLM_VOC,
-    "priority_result": DEMO_LLM_PRIORITY,
-}
-
-# ── Review Pass mock (review_node 전용) ──────────────────────────────────────
-DEMO_LLM_REVIEW_PASS = {
-    "verdict": "pass",
-    "confidence": 0.95,
-    "issues": [],
-    "corrections": {
-        "summary": {},
-        "voc_analysis": {},
-        "priority_result": {},
-    },
-    "blocked_actions": [],
-    "reason": "Transcript supports the analysis.",
 }

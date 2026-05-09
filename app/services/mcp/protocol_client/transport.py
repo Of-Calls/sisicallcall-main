@@ -65,8 +65,8 @@ def build_stdio_params(
 
     server_cwd = cwd or os.getenv("MCP_SERVER_CWD") or os.getcwd()
 
-    # 자식 프로세스가 부모 환경변수 (TENANT_INTEGRATION_STORAGE,
-    # MCP_USE_TENANT_OAUTH, MCP_ALLOW_ENV_FALLBACK, OAuth client secret 등)
+    # 자식 프로세스가 부모 환경변수 (MCP_USE_TENANT_OAUTH,
+    # MCP_ALLOW_ENV_FALLBACK, OAuth client secret, settings.database_url 등)
     # 를 그대로 보도록 현재 env 를 통째로 전달한다.
     env = dict(os.environ)
     if extra_env:

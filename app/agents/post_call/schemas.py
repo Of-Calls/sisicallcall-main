@@ -167,37 +167,3 @@ class PriorityResult(BaseModel):
     reason: str
 
 
-# ── Review Gate 스키마 ────────────────────────────────────────────────────────
-
-class ReviewVerdictValues:
-    """review_node verdict 허용값. 'pass'는 Python 예약어이므로 클래스 상수로 관리."""
-    PASS = "pass"
-    CORRECTABLE = "correctable"
-    RETRY = "retry"
-    FAIL = "fail"
-    _VALID = frozenset({"pass", "correctable", "retry", "fail"})
-
-    @classmethod
-    def is_valid(cls, v: str) -> bool:
-        return v in cls._VALID
-
-
-class ReviewIssue(BaseModel):
-    type: str
-    message: str
-    evidence: Optional[str] = None
-
-
-class ReviewResult(BaseModel):
-    verdict: str = "fail"
-    confidence: float = 0.0
-    confidence_missing: bool = False
-    confidence_parse_error: bool = False
-    confidence_source: str = "llm"
-    llm_fallback: bool = False
-    llm_fallback_reason: str = ""
-    issues: list[ReviewIssue] = Field(default_factory=list)
-    corrections: dict[str, Any] = Field(default_factory=dict)
-    corrected_keys: list[str] = Field(default_factory=list)
-    blocked_actions: list[str] = Field(default_factory=list)
-    reason: str = ""

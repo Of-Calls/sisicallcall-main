@@ -40,18 +40,18 @@ class ActionExecutor:
             return []
         results: list[dict] = []
         for action in actions:
+            # D-4: ActionItem.priority 가 있으면 params 에 자동 주입 (외부 시스템에 priority 전달 보장).
+            # post-call agent 가 priority 를 ActionItem 에만 두고 params 에서 뺐으므로
+            # connector 가 params 만 보는 경우를 안전하게 커버.
+            normalized = dict(action)
+            if "priority" in normalized:
+                params = dict(normalized.get("params") or {})
+                params.setdefault("priority", normalized["priority"])
+                normalized["params"] = params
             results.append(
-                await self._execute_one(action, call_id=call_id, tenant_id=tenant_id)
+                await self._execute_one(normalized, call_id=call_id, tenant_id=tenant_id)
             )
         return results
-
-    async def execute_all(self, actions: list[dict], *, call_id: str) -> list[dict]:
-        """후방 호환 인터페이스 — action_router_node 가 호출한다."""
-        return await self.execute_actions(
-            call_id=call_id,
-            tenant_id="",
-            actions=actions,
-        )
 
     async def _execute_one(
         self,

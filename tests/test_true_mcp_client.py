@@ -29,7 +29,6 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture()
 def mcp_env(monkeypatch):
     """자식 server process 의 동작을 결정짓는 env 를 정리."""
-    monkeypatch.setenv("TENANT_INTEGRATION_STORAGE", "memory")
     monkeypatch.setenv("MCP_USE_TENANT_OAUTH", "true")
     monkeypatch.setenv("MCP_ALLOW_ENV_FALLBACK", "false")
     monkeypatch.setenv("MCP_CLIENT_TIMEOUT_SEC", "30")

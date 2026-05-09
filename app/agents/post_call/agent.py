@@ -21,8 +21,8 @@ class PostCallAgent:
         """통화 후처리 에이전트 실행 엔트리포인트.
 
         trigger:
-          - call_ended           : 정상 통화 완료 → 풀 파이프라인
-          - escalation_immediate : 즉시 에스컬레이션 → summary만 실행
+          - call_ended           : 정상 통화 완료 → 풀 파이프라인 (analysis + reviewer + action)
+          - escalation_immediate : 즉시 에스컬레이션 → analysis 만 + save_intermediate 후 종료
           - manual               : 수동 재처리 → 풀 파이프라인
         """
         if trigger not in _VALID_TRIGGERS:
@@ -43,21 +43,35 @@ class PostCallAgent:
             "dashboard_payload": None,
             "errors": [],
             "partial_success": False,
-            # ── Review Gate 초기값 ─────────────────────────────────────────
+            # ── Agent 1 출력 ──────────────────────────────────────────────────
             "analysis_result": None,
+            "proposed_actions": [],
+            "analysis_planner_rationale": "",
+            "analysis_planner_telemetry": None,
+            "analysis_llm_usage": None,
+            # ── Agent 2 출력 ──────────────────────────────────────────────────
             "review_result": None,
             "review_verdict": None,
-            "review_retry_count": 0,
+            "approved_actions": [],
+            "corrections_to_analysis": {},
+            "escalate_reason": None,
+            "reviewer_steps": 0,
+            "reviewer_telemetry": None,
+            "review_llm_usage": None,
+            # ── Routing ────────────────────────────────────────────────────────
             "human_review_required": False,
+            # ── Legacy ────────────────────────────────────────────────────────
             "blocked_actions": [],
+            "review_retry_count": 0,
         }
 
         logger.info("PostCallAgent 시작 call_id=%s trigger=%s", call_id, trigger)
         result: PostCallAgentState = await self._graph.ainvoke(initial)
         logger.info(
-            "PostCallAgent 완료 call_id=%s partial=%s errors=%d",
+            "PostCallAgent 완료 call_id=%s partial=%s errors=%d verdict=%s",
             call_id,
             result.get("partial_success"),  # type: ignore[call-overload]
             len(result.get("errors", [])),  # type: ignore[call-overload]
+            result.get("review_verdict"),  # type: ignore[call-overload]
         )
         return result

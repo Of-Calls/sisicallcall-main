@@ -88,17 +88,12 @@ def _patch_runner_context_lookup() -> None:
 
 
 def _reset_llm_nodes() -> None:
-    import app.agents.post_call.nodes.post_call_analysis_node as _analysis
-    import app.agents.post_call.nodes.review_node as _review
-    import app.agents.post_call.nodes.summary_node as _summary
-    import app.agents.post_call.nodes.voc_analysis_node as _voc
-    import app.agents.post_call.nodes.priority_node as _priority
+    """real LLM 모드에서 신규 에이전트의 lazy LLM 인스턴스를 리셋."""
+    import app.agents.post_call.nodes.analysis_planner_agent_node as _planner
+    import app.agents.post_call.nodes.reviewer_agent_node as _reviewer
 
-    _analysis._caller = None  # type: ignore[attr-defined]
-    _review._caller = None  # type: ignore[attr-defined]
-    _summary._caller = None  # type: ignore[attr-defined]
-    _voc._caller = None  # type: ignore[attr-defined]
-    _priority._caller = None  # type: ignore[attr-defined]
+    _planner._llm = None  # type: ignore[attr-defined]
+    _reviewer._llm = None  # type: ignore[attr-defined]
 
 
 def _apply_llm_mode(llm_mode: str | None) -> str:

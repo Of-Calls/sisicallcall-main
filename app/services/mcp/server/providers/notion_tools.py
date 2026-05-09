@@ -49,10 +49,15 @@ def _resolve_token_and_db(tenant_id: str, params: dict) -> tuple[str, str, str]:
             except Exception:
                 token = meta.get("integration_token") or ""
 
-    if (not token or not db_id) and allow_env_fallback():
-        token = token or os.getenv("NOTION_API_TOKEN", "")
-        db_id = db_id or os.getenv("NOTION_DATABASE_ID", "")
-        source = "env_fallback"
+    # Notion 은 OAuth 가 아닌 Internal Integration Token 방식이라
+    # MCP_ALLOW_ENV_FALLBACK 정책의 적용 대상이 아니다 — env 가 있으면 항상 사용.
+    # (정책은 OAuth provider 가 env 로 silent fallback 하지 않게 하기 위함.)
+    if not token:
+        token = os.getenv("NOTION_API_TOKEN", "") or token
+    if not db_id:
+        db_id = os.getenv("NOTION_DATABASE_ID", "") or db_id
+    if token and not source:
+        source = "env"
 
     return token, db_id, source
 

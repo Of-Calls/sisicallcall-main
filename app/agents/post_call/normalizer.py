@@ -135,8 +135,20 @@ def normalize_summary(
     result["keywords"] = keywords
     result.setdefault("handoff_notes", None)
     result.setdefault("generation_mode", "async")
-    result.setdefault("model_used", "demo-mock-llm")
+    # D-6: model_used 동적 결정. mock 모드면 "mock", 아니면 실제 모델명.
+    result.setdefault("model_used", _resolve_model_used_label())
     return result
+
+
+def _resolve_model_used_label() -> str:
+    import os
+    mode = (os.environ.get("POST_CALL_LLM_MODE") or "").strip().lower()
+    if mode != "real":
+        legacy = (os.environ.get("POST_CALL_USE_REAL_LLM") or "").strip().lower()
+        if legacy not in {"1", "true", "yes", "on"}:
+            return "mock"
+    explicit = (os.environ.get("POST_CALL_LLM_MODEL") or "").strip()
+    return explicit if explicit else "gpt-4o"
 
 
 def normalize_voc_analysis(voc_analysis: dict, fallback_context: dict) -> dict:

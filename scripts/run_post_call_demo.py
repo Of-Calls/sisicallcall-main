@@ -31,11 +31,6 @@ load_dotenv(override=False)
 
 from tests.fixtures.demo_post_call_context import (  # noqa: E402
     DEMO_POST_CALL_CONTEXT,
-    DEMO_LLM_SUMMARY,
-    DEMO_LLM_VOC,
-    DEMO_LLM_PRIORITY,
-    DEMO_LLM_ANALYSIS,
-    DEMO_LLM_REVIEW_PASS,
 )
 from app.agents.post_call.context_provider import seed_test_context  # noqa: E402
 from app.agents.post_call.completed_call_runner import run_post_call_for_completed_call  # noqa: E402
@@ -187,39 +182,19 @@ def _print_result(result: dict) -> None:
     )
 
 
-# ── Demo LLM — DEMO_LLM_* 픽스처를 반환하는 stub ────────────────────────────
-
-class _DemoLLM:
-    async def call_json(self, system_prompt: str, user_message: str, max_tokens: int = 1024) -> dict:
-        # 새 통합 분석 노드 (우선 검사)
-        if "ANALYSIS_COMBINED" in system_prompt:
-            return DEMO_LLM_ANALYSIS
-        # 새 리뷰 게이트 노드
-        if "REVIEW_VERDICT" in system_prompt:
-            return DEMO_LLM_REVIEW_PASS
-        # 하위 호환 — legacy 노드가 혹시 남아 있는 경우
-        if "summary_short" in system_prompt:
-            return DEMO_LLM_SUMMARY
-        if "sentiment_result" in system_prompt:
-            return DEMO_LLM_VOC
-        return DEMO_LLM_PRIORITY
-
+# ── Demo LLM mode — 신규 2-에이전트 그래프는 POST_CALL_LLM_MODE=mock 으로 강제 ────
 
 def _patch_llm_nodes() -> None:
-    """LLM 노드의 _caller를 demo stub으로 교체한다."""
-    import app.agents.post_call.nodes.post_call_analysis_node as _analysis
-    import app.agents.post_call.nodes.review_node as _review
-    # 하위 호환 — legacy 노드도 patch (롤백 시 대비)
-    import app.agents.post_call.nodes.summary_node as _summary
-    import app.agents.post_call.nodes.voc_analysis_node as _voc
-    import app.agents.post_call.nodes.priority_node as _priority
+    """신규 2-에이전트 그래프에서는 mock 모드로 강제하기만 하면 된다.
 
-    _demo = _DemoLLM()
-    _analysis._caller = _demo  # type: ignore[attr-defined]
-    _review._caller   = _demo  # type: ignore[attr-defined]
-    _summary._caller  = _demo  # type: ignore[attr-defined]
-    _voc._caller      = _demo  # type: ignore[attr-defined]
-    _priority._caller = _demo  # type: ignore[attr-defined]
+    analysis_planner_agent_node 와 reviewer_agent_node 는
+    POST_CALL_LLM_MODE != 'real' 일 때 자체 결정론적 mock LLM 을 사용한다.
+    """
+    os.environ.setdefault("POST_CALL_LLM_MODE", "mock")
+    import app.agents.post_call.nodes.analysis_planner_agent_node as _planner
+    import app.agents.post_call.nodes.reviewer_agent_node as _reviewer
+    _planner._llm = None  # type: ignore[attr-defined]
+    _reviewer._llm = None  # type: ignore[attr-defined]
 
 
 # ── 메인 실행 ─────────────────────────────────────────────────────────────────

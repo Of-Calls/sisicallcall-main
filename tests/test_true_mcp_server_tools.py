@@ -5,8 +5,8 @@ KDT-101: 진짜 MCP Server tool 등록/실행 단위 테스트.
 - 각 tool 은 토큰/설정이 없을 때 표준 envelope 의 status=skipped 를 반환한다.
 - envelope 에 source=mcp_server / via_mcp=true / execution_mode=mcp 가 항상 포함된다.
 
-이 테스트는 외부 API 를 호출하지 않는다. tenant_integrations 는 memory
-백엔드를 강제하고 토큰을 주입하지 않으므로 connector 는 항상 skipped 다.
+이 테스트는 외부 API 를 호출하지 않는다. tenant_id="" 또는 미연결
+시나리오만 사용하므로 connector 는 DB 조회 없이 항상 skipped 다.
 """
 from __future__ import annotations
 
@@ -34,7 +34,6 @@ REQUIRED_TOOL_NAMES = {
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
-    monkeypatch.setenv("TENANT_INTEGRATION_STORAGE", "memory")
     monkeypatch.setenv("MCP_USE_TENANT_OAUTH", "true")
     monkeypatch.setenv("MCP_ALLOW_ENV_FALLBACK", "false")
     monkeypatch.delenv("SOLAPI_API_KEY", raising=False)
