@@ -170,11 +170,11 @@ def _format_check_response(result_data: dict) -> str:
         return f"{req_kor}{req_marker} 예약 가능합니다. 진행해드릴까요?"
     if status == "closed_day":
         if sug_kor:
-            return f"{req_kor}{req_marker} 휴무라 예약이 어려워요. 가까운 영업일 {sug_kor}{sug_marker} 예약 가능여부를 확인해드릴까요?"
+            return f"{req_kor}{req_marker} 휴무라 예약이 어려워요. 가장 빠른 예약 가능 시간은 {sug_kor}입니다. 진행해드릴까요?"
         return f"{req_kor}{req_marker} 휴무라 예약이 어려워요. 다른 날짜 알려주실 수 있을까요?"
     if status == "conflict":
         if sug_kor:
-            return f"{req_kor}{req_marker} 다른 예약이 있어요. 같은 날 {sug_kor}{sug_marker} 예약 가능여부를 확인해드릴까요?"
+            return f"{req_kor}{req_marker} 다른 예약이 있어요. 같은 날 {sug_kor} 예약 가능합니다. 진행해드릴까요?"
         return f"{req_kor}{req_marker} 다른 예약이 있어요. 다른 시간 알려주실 수 있을까요?"
     return _POLITE_MISSING_INFO
 
@@ -362,6 +362,11 @@ async def _force_check_then_confirm(
     enriched_args = dict(arguments)
     enriched_args["tenant_industry"] = tenant_industry
     enriched_args["tenant_name"] = tenant_name
+    # customer_phone — 캘린더 이벤트 description 에 노출 (시연 + audit 가시성).
+    # 시연용 SMS_TEST_RECIPIENT 자동 주입. 운영은 Twilio caller ID 로 교체.
+    test_recipient = os.getenv("SMS_TEST_RECIPIENT", "")
+    if test_recipient and not enriched_args.get("customer_phone"):
+        enriched_args["customer_phone"] = test_recipient
 
     try:
         avail_result = await mcp_client.call_tool(
@@ -395,7 +400,25 @@ async def _force_check_then_confirm(
         })
         return {"response_text": _format_check_response(result_data)}
 
-    # conflict / closed_day — 동의 단계 없이 안내만
+    # closed_day / conflict + 검증된 추천 슬롯 → pending 저장 (preferred_time 을 추천으로 swap).
+    # 사용자 "네" 한 마디로 추천 슬롯 자동 예약. fallback 흐름 답답함 제거.
+    suggestions = result_data.get("suggested_slots") or []
+    if suggestions:
+        swapped_args = dict(enriched_args)
+        swapped_args["preferred_time"] = suggestions[0]
+        await _call_session_svc.set_pending_task(call_id, {
+            "tool": "calendar",
+            "action_type": "schedule_callback",
+            "arguments": swapped_args,
+            "tenant_name": tenant_name,
+            "tenant_industry": tenant_industry,
+            "user_text": user_text,
+            "kind": "availability_confirmed",
+        })
+        print(f"[task_branch] {result_data.get('status')} + suggestion={suggestions[0]} → pending 저장")
+        return {"response_text": _format_check_response(result_data)}
+
+    # 추천 슬롯 없음 (만석) — 사용자에게 다른 시간/날짜 요청
     return {"response_text": _format_check_response(result_data)}
 
 
