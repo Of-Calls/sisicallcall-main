@@ -75,6 +75,23 @@ def _append_date_clauses(
     return sql
 
 
+def _append_calls_date_clauses(
+    sql: str,
+    params: list,
+    *,
+    column: str = "c.started_at",
+    date_from: str | None,
+    date_to: str | None,
+) -> str:
+    return _append_date_clauses(
+        sql,
+        params,
+        column=column,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
 async def _fetch_with_optional_conn(conn, callback):
     owns_conn = conn is None
     if owns_conn:
@@ -344,6 +361,116 @@ async def fetch_dashboard_intent_distribution(
         return None
 
 
+async def fetch_dashboard_keyword_stats(
+    tenant_id: str,
+    *,
+    limit: int = 10,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    conn=None,
+) -> list[dict] | None:
+    """Keyword frequency from ``call_summaries.keywords`` arrays."""
+    if not _is_uuid(tenant_id):
+        return None
+
+    normalized_limit = max(1, min(int(limit), 50))
+
+    async def _query(active_conn):
+        sql = """
+            SELECT keyword, COUNT(*)::int AS count
+            FROM (
+                SELECT NULLIF(TRIM(keyword::text), '') AS keyword
+                FROM calls c
+                JOIN call_summaries cs
+                  ON cs.call_id = c.id
+                 AND cs.tenant_id = c.tenant_id
+                CROSS JOIN LATERAL jsonb_array_elements_text(
+                    COALESCE(cs.keywords, '[]'::jsonb)
+                ) AS keyword
+                WHERE c.tenant_id = $1::uuid
+        """
+        params: list = [tenant_id]
+        sql = _append_calls_date_clauses(
+            sql,
+            params,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        sql += """
+            ) scoped
+            WHERE keyword IS NOT NULL
+            GROUP BY keyword
+            ORDER BY count DESC, keyword ASC
+        """
+        params.append(normalized_limit)
+        sql += f"\nLIMIT ${len(params)}"
+
+        rows = await active_conn.fetch(sql, *params)
+        return [{"keyword": row["keyword"], "count": int(row["count"] or 0)} for row in rows]
+
+    try:
+        return await _fetch_with_optional_conn(conn, _query)
+    except Exception as exc:
+        logger.warning("dashboard keyword stats DB query failed tenant_id=%s err=%s", tenant_id, exc)
+        return None
+
+
+async def fetch_dashboard_priority_distribution(
+    tenant_id: str,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    conn=None,
+) -> dict[str, int] | None:
+    """Counts of priority_result priorities with an action_required fallback."""
+    if not _is_uuid(tenant_id):
+        return None
+
+    async def _query(active_conn):
+        sql = """
+            SELECT
+              COALESCE(NULLIF(LOWER(va.priority_result->>'priority'), ''), 'medium') AS priority,
+              COUNT(*)::int AS count
+            FROM calls c
+            JOIN voc_analyses va
+              ON va.call_id = c.id
+             AND va.tenant_id = c.tenant_id
+            WHERE c.tenant_id = $1::uuid
+        """
+        params: list = [tenant_id]
+        sql = _append_calls_date_clauses(
+            sql,
+            params,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        sql += """
+              AND (
+                    LOWER(COALESCE(NULLIF(va.priority_result->>'action_required', ''), 'false'))
+                      IN ('true', 't', '1', 'yes')
+                 OR LOWER(COALESCE(NULLIF(va.priority_result->>'priority', ''), 'medium'))
+                      IN ('high', 'critical')
+              )
+            GROUP BY priority
+        """
+
+        rows = await active_conn.fetch(sql, *params)
+        result = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        for row in rows:
+            priority = str(row["priority"] or "medium").strip().lower()
+            count = int(row["count"] or 0)
+            if priority not in result:
+                priority = "medium"
+            result[priority] += count
+        return result
+
+    try:
+        return await _fetch_with_optional_conn(conn, _query)
+    except Exception as exc:
+        logger.warning("dashboard priority distribution DB query failed tenant_id=%s err=%s", tenant_id, exc)
+        return None
+
+
 async def fetch_priority_distribution(
     conn,
     tenant_id: str,
@@ -440,6 +567,168 @@ async def fetch_action_status_distribution(
 
     rows = await conn.fetch(sql, *params)
     return [{"label": r["label"], "count": int(r["count"])} for r in rows]
+
+
+async def fetch_dashboard_stats(
+    conn,
+    tenant_id: str,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """Tenant-scoped top-line dashboard counters."""
+
+    calls_sql = """
+        SELECT COUNT(*)::int AS total_calls
+        FROM calls c
+        WHERE c.tenant_id = $1::uuid
+    """
+    calls_params: list = [tenant_id]
+    calls_sql = _append_calls_date_clauses(
+        calls_sql,
+        calls_params,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    resolved_sql = """
+        SELECT COUNT(*)::int AS resolved_count
+        FROM calls c
+        JOIN call_summaries cs
+          ON cs.call_id = c.id
+         AND cs.tenant_id = c.tenant_id
+        WHERE c.tenant_id = $1::uuid
+          AND cs.resolution_status = 'resolved'
+    """
+    resolved_params: list = [tenant_id]
+    resolved_sql = _append_calls_date_clauses(
+        resolved_sql,
+        resolved_params,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    escalated_sql = """
+        SELECT COUNT(*)::int AS escalated_count
+        FROM calls c
+        JOIN call_summaries cs
+          ON cs.call_id = c.id
+         AND cs.tenant_id = c.tenant_id
+        WHERE c.tenant_id = $1::uuid
+          AND cs.resolution_status = 'escalated'
+    """
+    escalated_params: list = [tenant_id]
+    escalated_sql = _append_calls_date_clauses(
+        escalated_sql,
+        escalated_params,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    action_required_sql = """
+        SELECT COUNT(*)::int AS action_required_count
+        FROM calls c
+        JOIN voc_analyses va
+          ON va.call_id = c.id
+         AND va.tenant_id = c.tenant_id
+        WHERE c.tenant_id = $1::uuid
+          AND (
+                LOWER(COALESCE(NULLIF(va.priority_result->>'action_required', ''), 'false'))
+                  IN ('true', 't', '1', 'yes')
+             OR LOWER(COALESCE(NULLIF(va.priority_result->>'priority', ''), 'medium'))
+                  IN ('high', 'critical')
+          )
+    """
+    action_required_params: list = [tenant_id]
+    action_required_sql = _append_calls_date_clauses(
+        action_required_sql,
+        action_required_params,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    mcp_success_sql = """
+        SELECT COUNT(*)::int AS mcp_success_count
+        FROM mcp_action_logs ml
+        JOIN calls c
+          ON c.id::text = ml.call_id
+         AND c.tenant_id::text = ml.tenant_id
+        WHERE ml.tenant_id = $1::text
+          AND ml.status = 'success'
+    """
+    mcp_success_params: list = [tenant_id]
+    mcp_success_sql = _append_calls_date_clauses(
+        mcp_success_sql,
+        mcp_success_params,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    mcp_failed_sql = """
+        SELECT COUNT(*)::int AS mcp_failed_count
+        FROM mcp_action_logs ml
+        JOIN calls c
+          ON c.id::text = ml.call_id
+         AND c.tenant_id::text = ml.tenant_id
+        WHERE ml.tenant_id = $1::text
+          AND ml.status IN ('fail', 'failed')
+    """
+    mcp_failed_params: list = [tenant_id]
+    mcp_failed_sql = _append_calls_date_clauses(
+        mcp_failed_sql,
+        mcp_failed_params,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    partial_success_sql = """
+        SELECT COUNT(*)::int AS partial_success_count
+        FROM calls c
+        JOIN voc_analyses va
+          ON va.call_id = c.id
+         AND va.tenant_id = c.tenant_id
+        WHERE c.tenant_id = $1::uuid
+          AND va.partial_success = TRUE
+    """
+    partial_success_params: list = [tenant_id]
+    partial_success_sql = _append_calls_date_clauses(
+        partial_success_sql,
+        partial_success_params,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    total_row = await conn.fetchrow(calls_sql, *calls_params)
+    resolved_row = await conn.fetchrow(resolved_sql, *resolved_params)
+    escalated_row = await conn.fetchrow(escalated_sql, *escalated_params)
+    action_required_row = await conn.fetchrow(action_required_sql, *action_required_params)
+    mcp_success_row = await conn.fetchrow(mcp_success_sql, *mcp_success_params)
+    mcp_failed_row = await conn.fetchrow(mcp_failed_sql, *mcp_failed_params)
+    partial_success_row = await conn.fetchrow(partial_success_sql, *partial_success_params)
+
+    def _count_value(row, key: str) -> int:
+        if row is None:
+            return 0
+        try:
+            return int(row[key] or 0)
+        except Exception:
+            return 0
+
+    total_calls = _count_value(total_row, "total_calls")
+    resolved_count = _count_value(resolved_row, "resolved_count")
+    escalated_count = _count_value(escalated_row, "escalated_count")
+
+    return {
+        "total_calls": total_calls,
+        "resolved_count": resolved_count,
+        "escalated_count": escalated_count,
+        "agent_connected_count": escalated_count,
+        "resolution_rate": round((resolved_count / total_calls) * 100, 2) if total_calls else 0,
+        "action_required_count": _count_value(action_required_row, "action_required_count"),
+        "mcp_success_count": _count_value(mcp_success_row, "mcp_success_count"),
+        "mcp_failed_count": _count_value(mcp_failed_row, "mcp_failed_count"),
+        "partial_success_count": _count_value(partial_success_row, "partial_success_count"),
+    }
 
 
 # ── Recent rows ───────────────────────────────────────────────────────────────
