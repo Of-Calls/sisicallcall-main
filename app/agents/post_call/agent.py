@@ -60,6 +60,9 @@ class PostCallAgent:
             "review_llm_usage": None,
             # ── Routing ────────────────────────────────────────────────────────
             "human_review_required": False,
+            # ── Reviewer fail → analysis 재시도 루프 ─────────────────────────
+            "analysis_retry_count": 0,
+            "review_feedback": [],
             # ── Legacy ────────────────────────────────────────────────────────
             "blocked_actions": [],
             "review_retry_count": 0,

@@ -114,8 +114,19 @@ F. 단순 정보 문의 / 해결된 통화 (action_required=false) → propose_n
 반드시 record_analysis 를 포함하여 도구 호출을 시작하세요. 텍스트 응답만 내면 안 됩니다."""
 
 
-def _build_system_prompt() -> str:
-    return _SYSTEM_PROMPT_TEMPLATE.format(today=_today_label())
+def _build_system_prompt(review_feedback: list[str] | None = None) -> str:
+    base = _SYSTEM_PROMPT_TEMPLATE.format(today=_today_label())
+    feedback = [s for s in (review_feedback or []) if s and str(s).strip()]
+    if not feedback:
+        return base
+    bullets = "\n".join(f"- {s}" for s in feedback)
+    retry_block = (
+        "\n\n[이전 분석 검토 결과 — 다음 문제가 지적되었다]\n"
+        f"{bullets}\n"
+        "위 지적사항을 반영해서 분석을 다시 작성하라. "
+        "같은 실수 반복 시 인간 검토 큐로 빠진다."
+    )
+    return base + retry_block
 
 
 def _validate_callback_time(raw: str) -> tuple[str, str | None]:
@@ -525,6 +536,15 @@ async def analysis_planner_agent_node(state: PostCallAgentState) -> dict:
     transcripts_text = _format_transcripts(transcripts)
     user_message = f"통화 녹취:\n{transcripts_text}"
 
+    review_feedback: list[str] = list(state.get("review_feedback") or [])  # type: ignore[call-overload]
+    retry_count = int(state.get("analysis_retry_count") or 0)  # type: ignore[call-overload]
+    system_prompt = _build_system_prompt(review_feedback)
+    if retry_count > 0:
+        logger.info(
+            "analysis_planner: 재시도 호출 call_id=%s retry_count=%d feedback_items=%d",
+            call_id, retry_count, len(review_feedback),
+        )
+
     llm = _get_llm()
     last_error: str | None = None
     response: dict | None = None
@@ -533,7 +553,7 @@ async def analysis_planner_agent_node(state: PostCallAgentState) -> dict:
     for attempt in range(2):
         try:
             response = await llm.generate_with_tools(
-                system_prompt=_build_system_prompt(),
+                system_prompt=system_prompt,
                 user_message=user_message,
                 tools=tools,
                 temperature=0.0,
@@ -696,16 +716,18 @@ async def analysis_planner_agent_node(state: PostCallAgentState) -> dict:
         },
         "tool_counts": tool_counts,
         "latency_ms": latency_ms,
+        "retry_count": retry_count,
     }
 
     logger.info(
         "post_call telemetry node=analysis_planner call_id=%s tenant=%s "
-        "tokens=%d latency_ms=%d emotion=%s priority=%s proposed=%d dropped=%d violations=%d",
+        "tokens=%d latency_ms=%d emotion=%s priority=%s proposed=%d dropped=%d violations=%d retry_count=%d",
         call_id, tenant_id,
         telemetry["tokens"]["total"], latency_ms,
         analysis["summary"].get("customer_emotion"),
         analysis["priority_result"].get("priority"),
         len(proposed), len(dropped_unknown), len(violations),
+        retry_count,
     )
 
     out: dict = {

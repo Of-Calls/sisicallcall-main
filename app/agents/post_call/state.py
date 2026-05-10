@@ -39,6 +39,10 @@ class PostCallAgentState(TypedDict):
     # ── Routing flags ─────────────────────────────────────────────────────────
     human_review_required: bool          # True 이면 외부 action 실행 금지
 
+    # ── Reviewer fail → analysis 재시도 루프 ──────────────────────────────────
+    analysis_retry_count: int            # planner 재실행 횟수 (0 = 최초 시도)
+    review_feedback: list[str]           # 이전 reviewer 가 지적한 fail 사유 누적
+
     # ── Legacy fields (호환 유지 — 곧 비울 예정) ───────────────────────────────
     blocked_actions: list[str]
     review_retry_count: int

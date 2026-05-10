@@ -82,7 +82,11 @@ async def save_result_node(state: PostCallAgentState, mode: SaveMode = "final") 
         "telemetry": {
             "analysis_planner": planner_telemetry,
             "reviewer": reviewer_telemetry,
+            "analysis_retry_count": int(normalized_state.get("analysis_retry_count") or 0),
+            "review_feedback": list(normalized_state.get("review_feedback") or []),
         },
+        "analysis_retry_count": int(normalized_state.get("analysis_retry_count") or 0),
+        "review_feedback": list(normalized_state.get("review_feedback") or []),
     }
 
     try:
@@ -111,11 +115,13 @@ async def save_result_node(state: PostCallAgentState, mode: SaveMode = "final") 
         rt_steps = rt.get("steps", 0)
         rt_max = rt.get("max_steps_reached", False)
         latency_total = int((pt.get("latency_ms") or 0) + (rt.get("latency_ms") or 0))
+        retry_count = int(normalized_state.get("analysis_retry_count") or 0)
         logger.info(
             "post_call telemetry call_id=%s tenant=%s verdict=%s "
             "planner_tokens=%d reviewer_tokens=%d total_tokens=%d "
             "reviewer_steps=%d max_steps_reached=%s latency_ms=%d "
-            "approved=%d executed=%d errors=%d partial_success=%s",
+            "approved=%d executed=%d errors=%d partial_success=%s "
+            "analysis_retry_count=%d",
             call_id,
             normalized_state.get("tenant_id"),
             normalized_state.get("review_verdict"),
@@ -124,6 +130,7 @@ async def save_result_node(state: PostCallAgentState, mode: SaveMode = "final") 
             len(normalized_state.get("approved_actions") or []),
             len(normalized_state.get("executed_actions") or []),
             len(errors), final_partial_success,
+            retry_count,
         )
 
     out: dict = {

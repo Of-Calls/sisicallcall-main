@@ -33,6 +33,21 @@ DEFAULT_CUSTOMER_PHONE = "010-0000-0000"   # e2e — 임의 (사용자 합의)
 # ── 시나리오 transcripts ─────────────────────────────────────────────────────
 
 SCENARIOS: dict[str, dict] = {
+    "e2e-retry-001": {
+        "scenario": "retry_force_fail_then_pass",
+        "caller_number": DEFAULT_CUSTOMER_PHONE,
+        "branch_stats": {"faq": 0, "task": 0, "escalation": 1},
+        "transcripts": [
+            {"role": "customer", "text": "지난주 주문한 가방, 사진이랑 색상이 완전히 다른데 환불 처리해주세요."},
+            {"role": "agent", "text": "고객님, 단순 변심으로는 환불이 어렵습니다."},
+            {"role": "customer", "text": "단순 변심이 아니라 상품 설명이랑 다르다고요. 이거 사기 아닌가요?"},
+            {"role": "agent", "text": "정책상 7일 이내라도 사용 흔적이 있으면 환불이 어렵습니다."},
+            {"role": "customer", "text": "사용도 안 했어요. 박스 그대로 있는데 사용 흔적이 어디 있어요? 정말 화가 납니다."},
+            {"role": "agent", "text": "내부에서 검토 후 다시 연락드리겠습니다."},
+            {"role": "customer", "text": "검토 같은 소리 하지 마세요. 소비자보호원 신고하고 민원 넣을 거예요."},
+            {"role": "agent", "text": "죄송합니다. 상부에 보고드리겠습니다."},
+        ],
+    },
     "e2e-001-v2": {
         "scenario": "angry_unresolved",
         "caller_number": DEFAULT_CUSTOMER_PHONE,

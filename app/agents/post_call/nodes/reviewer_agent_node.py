@@ -610,6 +610,25 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
     approved_actions = _sync_action_priorities(approved_actions, final_priority)
     rejected_actions = _sync_action_priorities(rejected_actions, final_priority)
 
+    # ── verdict=fail 시 analysis_planner 재시도용 feedback 추출 ────────────────
+    feedback_for_retry: list[str] = []
+    if verdict == "fail":
+        if escalate_reason:
+            feedback_for_retry.append(f"reviewer_escalated: {escalate_reason}")
+        for aid, reason in reject_reasons.items():
+            if reason:
+                feedback_for_retry.append(f"action_rejected[{aid}]: {reason}")
+        for dropped in corrections_dropped:
+            field = dropped.get("field", "?")
+            drop_reason = dropped.get("drop_reason", "")
+            feedback_for_retry.append(
+                f"correction_dropped[{field}]: {drop_reason} — 분석을 그대로 유지"
+            )
+        if finalize_reason and not escalate_reason:
+            feedback_for_retry.append(f"verdict_fail: {finalize_reason}")
+        if not feedback_for_retry:
+            feedback_for_retry.append("verdict_fail_unknown_reason")
+
     review_result = {
         "verdict": verdict,
         "approved_actions": approved_actions,
@@ -620,6 +639,7 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
         "steps": steps_used,
         "finalize_reason": finalize_reason,
         "forced_close": forced_close,
+        "feedback_for_retry": feedback_for_retry,
     }
 
     latency_ms = int((time.perf_counter() - t0) * 1000)
