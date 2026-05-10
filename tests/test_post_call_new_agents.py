@@ -509,15 +509,14 @@ async def test_reviewer_escalate_to_human_returns_fail(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_graph_save_intermediate_runs_before_reviewer(monkeypatch):
-    """save_intermediate 가 reviewer 전에 호출되어 분석이 저장되는지 확인.
+async def test_graph_no_save_when_fail_max_retries(monkeypatch):
+    """reviewer fail max 시 분석 저장 차단 — save_reviewed_analysis 호출 0회.
 
-    reviewer 가 fail 을 반환하더라도 call_summaries 에 분석이 남아 있어야 한다.
-    fail 발생 시 retry 사이클마다 save_intermediate 가 다시 호출돼 분석이 갱신된다
-    (ON CONFLICT upsert 라 멱등). 마지막 단계는 항상 save_final.
+    이전 흐름과 정반대: 검토 통과 분석만 저장. fail max 도달 시 call_summaries /
+    voc_analyses 에 row 가 들어가지 않는다 (잘못된 분석으로 프론트 노출 방지).
+    save_final 은 mcp_action_logs / dashboard 갱신 위해 한 번 호출.
     """
     from app.agents.post_call.agent import PostCallAgent
-    from app.agents.post_call.graph import MAX_ANALYSIS_RETRIES
     import app.agents.post_call.nodes.load_context_node as lcn
 
     mock_repo = MagicMock()
@@ -555,11 +554,10 @@ async def test_graph_save_intermediate_runs_before_reviewer(monkeypatch):
 
     result = await agent.run("g-001", trigger="call_ended", tenant_id="t-graph")
 
-    # retry 사이클마다 save_intermediate. 모두 fail → 총 (MAX_RETRIES + 1) 회
-    # intermediate + 마지막 1 회 final.
-    expected_intermediates = MAX_ANALYSIS_RETRIES + 1
-    assert save_calls.count("intermediate") == expected_intermediates, (
-        f"save_intermediate 호출 횟수 기대={expected_intermediates} 실제={save_calls.count('intermediate')}"
+    # fail max 경로 — save_reviewed_analysis (mode='intermediate') 호출 0회.
+    # save_final 만 1회. 분석 본문은 어디에도 영속화되지 않는다.
+    assert save_calls.count("intermediate") == 0, (
+        f"fail max 시 save_reviewed_analysis 호출 0 기대. 실제={save_calls.count('intermediate')}"
     )
     assert save_calls.count("final") == 1
     assert save_calls[-1] == "final"
@@ -1316,7 +1314,8 @@ async def test_graph_fail_skips_action_executor(monkeypatch):
     fake_executor = MagicMock()
     fake_executor.execute_actions = AsyncMock()
     monkeypatch.setattr(exec_node, "_executor", fake_executor)
-    # auto_action_executor 도 NOTION 미설정이라 auto 액션 0 → 그냥 빈 결과
+    # auto_action_executor 는 호출됨 — admin alert 2건 (Slack + Gmail) 발송 위해.
+    # NOTION 은 미설정이라 _inject_mandatory_actions 에서 auto Notion 추가 안 됨.
     fake_auto_executor = MagicMock()
     fake_auto_executor.execute_actions = AsyncMock(return_value=[])
     monkeypatch.setattr(auto_exec_node, "_executor", fake_auto_executor)
@@ -1326,10 +1325,14 @@ async def test_graph_fail_skips_action_executor(monkeypatch):
 
     assert result["review_verdict"] == "fail"
     assert result["human_review_required"] is True
-    assert fake_executor.execute_actions.await_count == 0
-    # auto_action_executor 는 호출되지만 NOTION 없어 0 액션 → executor 위임 안 됨
-    assert fake_auto_executor.execute_actions.await_count == 0
-    assert result["executed_actions"] == []
+    assert fake_executor.execute_actions.await_count == 0, "LLM-approved 발송 차단"
+    # notify_admin_review_failed 가 alert 2건을 proposed 에 넣었으므로 auto_action_executor 1회 호출
+    assert fake_auto_executor.execute_actions.await_count == 1, "admin alert 발송 1회"
+    sent_actions = fake_auto_executor.execute_actions.await_args.kwargs.get("actions") or \
+                   fake_auto_executor.execute_actions.await_args.args[2]
+    types = {a["action_type"] for a in sent_actions}
+    assert {"send_slack_alert", "send_manager_email"}.issubset(types), \
+        f"admin alert 두 채널 모두 포함. 실제: {types}"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1636,10 +1639,16 @@ async def test_review_pass_after_retry_executes_actions(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_save_intermediate_idempotent_on_retry(monkeypatch):
-    """retry 발생 시 save_intermediate 가 여러 번 호출돼도 같은 call_id 로 upsert 됨 (중복 INSERT 안 일어남)."""
+async def test_no_analysis_save_when_fail_max_retries(monkeypatch):
+    """fail 3회 → call_summaries / voc_analyses 에 분석 미저장 (사용자 핵심 의도).
+
+    검토 통과 분석만 저장한다. fail max 도달 시:
+      - save_summary / save_voc_analysis 호출 0회
+      - mcp_action_logs 는 admin_alert 발송분만 1회 (notify_admin → auto_action_executor)
+    """
     from app.agents.post_call.agent import PostCallAgent
     import app.agents.post_call.nodes.action_executor_node as exec_node
+    import app.agents.post_call.nodes.auto_action_executor_node as auto_exec_node
     import app.agents.post_call.nodes.save_result_node as save_mod
 
     _patch_full_catalog(monkeypatch)
@@ -1647,14 +1656,27 @@ async def test_save_intermediate_idempotent_on_retry(monkeypatch):
         {"role": "customer", "text": "환불 처리 정말 화나네요"},
     ])
 
-    # reviewer: 1차 fail → 2차 fail → 3차 fail (max 도달)
+    # reviewer: 모든 호출 fail (max 도달)
     fake_reviewer_llm = MagicMock()
     fake_reviewer_llm.generate_with_tools = AsyncMock(return_value=_make_reviewer_fail_response())
     monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer_llm)
 
+    # main executor 호출 0
     fake_executor = MagicMock()
     fake_executor.execute_actions = AsyncMock(return_value=[])
     monkeypatch.setattr(exec_node, "_executor", fake_executor)
+
+    # auto executor — admin alert 발송분만 success 로 반환
+    fake_auto_executor = MagicMock()
+    fake_auto_executor.execute_actions = AsyncMock(return_value=[
+        {"action_type": "send_slack_alert", "tool": "slack", "status": "success",
+         "external_id": "slack-admin-001",
+         "idempotency_token": "auto:admin_alert_review_failed_slack"},
+        {"action_type": "send_manager_email", "tool": "gmail", "status": "success",
+         "external_id": "gmail-admin-001",
+         "idempotency_token": "auto:admin_alert_review_failed_email"},
+    ])
+    monkeypatch.setattr(auto_exec_node, "_executor", fake_auto_executor)
 
     # repo 호출 spy
     summary_calls: list[tuple] = []
@@ -1681,19 +1703,15 @@ async def test_save_intermediate_idempotent_on_retry(monkeypatch):
     call_id = "f-retry-004"
     result = await agent.run(call_id, trigger="call_ended", tenant_id="t-retry")
 
-    # 3회 분석 사이클 → save_intermediate 3회 + save_final 1회 = save_summary 4회 호출
-    # 모두 같은 call_id 여야 함 (멱등 upsert).
-    assert len(summary_calls) >= 3, f"summary 저장 호출 부족: {len(summary_calls)}"
-    for cid, _ in summary_calls:
-        assert cid == call_id, f"call_id 일관성 위반: {cid} vs {call_id}"
-    for cid, _ in voc_calls:
-        assert cid == call_id
-
-    # action_log 는 final 단계에서만 호출. 또는 executed_actions 가 없으면 호출 안 됨.
-    # human_queue 분기 → executor 미호출 → executed_actions=[] → action_log 미호출 (save_actions 가 if actions 가드).
-    assert len(action_log_calls) == 0
+    # 핵심: 분석 저장 0회 (검토 미통과 분석은 영속화 차단).
+    assert len(summary_calls) == 0, f"fail max 시 summary 저장 0 기대. 실제={len(summary_calls)}"
+    assert len(voc_calls) == 0, f"fail max 시 voc 저장 0 기대. 실제={len(voc_calls)}"
+    # admin alert 발송 결과는 mcp_action_logs 에 기록됨 (executed_actions 비어있지 않음).
+    assert len(action_log_calls) == 1, "admin alert mcp_action_logs 기록"
+    assert fake_auto_executor.execute_actions.await_count == 1
     assert result["analysis_retry_count"] == 2
     assert result["review_verdict"] == "fail"
+    assert result["human_review_required"] is True
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2221,3 +2239,285 @@ async def test_idempotency_race_condition_blocks_double_send(monkeypatch):
     # gateway 가 두 번 호출됐을 가능성 명시:
     assert sent_count["n"] in (1, 2), \
         f"5a 정책: 1 또는 2 회 호출 가능. 실제: {sent_count['n']}. UNIQUE 제약 (5b) 도입 시 항상 1."
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# H — save_reviewed_analysis (검토 통과 시만 저장) + notify_admin_review_failed
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _spy_save_repos(monkeypatch):
+    """save_result_node 의 repo 3종을 spy 로 교체. 호출 인자 list 반환."""
+    import app.agents.post_call.nodes.save_result_node as save_mod
+    summary_calls: list[tuple] = []
+    voc_calls: list[tuple] = []
+    action_log_calls: list[tuple] = []
+
+    fake_summary_repo = MagicMock()
+    fake_summary_repo.save_summary = AsyncMock(
+        side_effect=lambda call_id, *a, **kw: summary_calls.append((call_id, kw))
+    )
+    fake_voc_repo = MagicMock()
+    fake_voc_repo.save_voc_analysis = AsyncMock(
+        side_effect=lambda call_id, *a, **kw: voc_calls.append((call_id, kw))
+    )
+    fake_action_repo = MagicMock()
+    fake_action_repo.save_action_log = AsyncMock(
+        side_effect=lambda call_id, *a, **kw: action_log_calls.append((call_id, kw))
+    )
+    monkeypatch.setattr(save_mod, "_summary_repo", fake_summary_repo)
+    monkeypatch.setattr(save_mod, "_voc_repo", fake_voc_repo)
+    monkeypatch.setattr(save_mod, "_action_log_repo", fake_action_repo)
+    return summary_calls, voc_calls, action_log_calls
+
+
+@pytest.mark.asyncio
+async def test_save_reviewed_analysis_only_runs_after_pass(monkeypatch):
+    """reviewer pass → call_summaries / voc_analyses 저장됨 (intermediate 1 + final 1 = 2회)."""
+    from app.agents.post_call.agent import PostCallAgent
+    import app.agents.post_call.nodes.action_executor_node as exec_node
+
+    _patch_full_catalog(monkeypatch)
+    _patch_load_context(monkeypatch, transcripts=[
+        {"role": "customer", "text": "운영시간 문의"},
+    ])
+
+    summary_calls, voc_calls, _ = _spy_save_repos(monkeypatch)
+
+    fake_executor = MagicMock()
+    fake_executor.execute_actions = AsyncMock(return_value=[])
+    monkeypatch.setattr(exec_node, "_executor", fake_executor)
+
+    agent = PostCallAgent()
+    result = await agent.run("h-pass-001", trigger="call_ended", tenant_id="t-h")
+
+    assert result["review_verdict"] in ("pass", "correctable")
+    assert len(summary_calls) >= 1, "pass 시 summary 저장 (save_reviewed_analysis 단계)"
+    assert all(cid == "h-pass-001" for cid, _ in summary_calls)
+    assert len(voc_calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_save_reviewed_analysis_runs_after_correctable(monkeypatch):
+    """reviewer correctable + corrections 적용 후 저장."""
+    from app.agents.post_call.agent import PostCallAgent
+    import app.agents.post_call.nodes.action_executor_node as exec_node
+
+    _patch_full_catalog(monkeypatch)
+    _patch_load_context(monkeypatch, transcripts=[
+        {"role": "customer", "text": "환불 처리"},
+        {"role": "agent", "text": "확인하겠습니다"},
+    ])
+
+    # reviewer: correct_analysis 후 finalize correctable
+    fake_reviewer_llm = MagicMock()
+    fake_reviewer_llm.generate_with_tools = AsyncMock(side_effect=[
+        {
+            "tool_calls": [
+                {"id": "c", "name": "correct_analysis", "arguments": {
+                    "field": "summary.handoff_notes",
+                    "new_value": None,
+                    "reason": "transcript 에 근거 없음",
+                    "transcript_evidence": "",
+                }},
+                {"id": "f", "name": "finalize_review",
+                 "arguments": {"verdict": "correctable", "summary_reason": "보정"}},
+            ],
+            "text": "", "raw_message": None,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "model": "mock"},
+        },
+    ])
+    monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer_llm)
+
+    summary_calls, _, _ = _spy_save_repos(monkeypatch)
+
+    fake_executor = MagicMock()
+    fake_executor.execute_actions = AsyncMock(return_value=[])
+    monkeypatch.setattr(exec_node, "_executor", fake_executor)
+
+    agent = PostCallAgent()
+    result = await agent.run("h-correctable-001", trigger="call_ended", tenant_id="t-h")
+
+    # correctable 도 pass 와 동일하게 save_reviewed_analysis 거침.
+    assert result["review_verdict"] in ("pass", "correctable")
+    assert len(summary_calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_admin_alert_sent_on_fail_max_retries(monkeypatch):
+    """fail 3회 → notify_admin_review_failed 가 Slack + Gmail 두 PlannedAction 생성 후
+    auto_action_executor 가 발송."""
+    from app.agents.post_call.agent import PostCallAgent
+    import app.agents.post_call.nodes.action_executor_node as exec_node
+    import app.agents.post_call.nodes.auto_action_executor_node as auto_exec_node
+
+    _patch_full_catalog(monkeypatch)
+    _patch_load_context(monkeypatch, transcripts=[
+        {"role": "customer", "text": "환불"},
+    ])
+
+    fake_reviewer_llm = MagicMock()
+    fake_reviewer_llm.generate_with_tools = AsyncMock(
+        return_value=_make_reviewer_fail_response()
+    )
+    monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer_llm)
+
+    fake_executor = MagicMock()
+    fake_executor.execute_actions = AsyncMock(return_value=[])
+    monkeypatch.setattr(exec_node, "_executor", fake_executor)
+
+    captured_actions: list[list[dict]] = []
+
+    async def capture(call_id, tenant_id, actions):
+        captured_actions.append(actions)
+        return [{**a, "status": "success", "external_id": f"x-{i}"}
+                for i, a in enumerate(actions)]
+
+    fake_auto = MagicMock()
+    fake_auto.execute_actions = AsyncMock(side_effect=capture)
+    monkeypatch.setattr(auto_exec_node, "_executor", fake_auto)
+
+    agent = PostCallAgent()
+    await agent.run("h-fail-001", trigger="call_ended", tenant_id="t-h")
+
+    assert fake_auto.execute_actions.await_count == 1
+    sent = captured_actions[0]
+    types = {a["action_type"] for a in sent}
+    assert "send_slack_alert" in types, f"Slack admin alert 누락. 실제: {types}"
+    assert "send_manager_email" in types, f"Gmail admin alert 누락. 실제: {types}"
+
+    # priority=critical 확인
+    for a in sent:
+        if a["action_type"] in ("send_slack_alert", "send_manager_email"):
+            assert a["priority"] == "critical", f"admin alert priority=critical 기대. 실제: {a['priority']}"
+
+
+@pytest.mark.asyncio
+async def test_admin_alert_idempotent(monkeypatch):
+    """동일 call_id 의 admin alert 토큰이 결정론적 — 재실행 시 같은 token."""
+    from app.agents.post_call.nodes.notify_admin_review_failed_node import (
+        _build_admin_alert_actions,
+    )
+    a1 = _build_admin_alert_actions(call_id="h-idem-001", tenant_id="t-h", body="x")
+    a2 = _build_admin_alert_actions(call_id="h-idem-001", tenant_id="t-h", body="x")
+    tokens1 = {a["idempotency_token"] for a in a1}
+    tokens2 = {a["idempotency_token"] for a in a2}
+    assert tokens1 == tokens2, f"같은 call 의 token 동일. 1={tokens1} 2={tokens2}"
+    assert tokens1 == {
+        "auto:admin_alert_review_failed_slack",
+        "auto:admin_alert_review_failed_email",
+    }
+
+
+@pytest.mark.asyncio
+async def test_notion_auto_inject_runs_even_on_fail_with_marker(monkeypatch):
+    """fail 3회 → Notion auto 액션도 발송되지만 [REVIEW_FAILED] 마커 + customer_emotion=unknown."""
+    from app.agents.post_call.agent import PostCallAgent
+    import app.agents.post_call.nodes.action_executor_node as exec_node
+    import app.agents.post_call.nodes.auto_action_executor_node as auto_exec_node
+
+    _patch_full_catalog(monkeypatch)
+    _enable_notion(monkeypatch)
+    _patch_load_context(monkeypatch, transcripts=[
+        {"role": "customer", "text": "환불 처리 정말 화나네요. 민원"},
+    ])
+
+    fake_reviewer_llm = MagicMock()
+    fake_reviewer_llm.generate_with_tools = AsyncMock(
+        return_value=_make_reviewer_fail_response()
+    )
+    monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer_llm)
+
+    fake_executor = MagicMock()
+    fake_executor.execute_actions = AsyncMock(return_value=[])
+    monkeypatch.setattr(exec_node, "_executor", fake_executor)
+
+    captured: list[list[dict]] = []
+
+    async def capture(call_id, tenant_id, actions):
+        captured.append(actions)
+        return [{**a, "status": "success", "external_id": f"x-{i}"}
+                for i, a in enumerate(actions)]
+
+    fake_auto = MagicMock()
+    fake_auto.execute_actions = AsyncMock(side_effect=capture)
+    monkeypatch.setattr(auto_exec_node, "_executor", fake_auto)
+
+    agent = PostCallAgent()
+    await agent.run("h-fail-marker-001", trigger="call_ended", tenant_id="t-h")
+
+    sent = captured[0]
+    notion_actions = [a for a in sent
+                      if a["action_type"] in ("create_notion_call_record", "create_notion_voc_record")]
+    assert len(notion_actions) >= 1, "Notion auto 액션이 fail 시에도 발송돼야 함"
+    for a in notion_actions:
+        params = a["params"]
+        assert str(params.get("title", "")).startswith("[REVIEW_FAILED]"), \
+            f"title 마커 누락: {params.get('title')!r}"
+        assert str(params.get("summary", "")).startswith("[REVIEW_FAILED]"), \
+            f"summary 마커 누락: {params.get('summary')!r}"
+        assert params.get("customer_emotion") == "unknown", \
+            f"customer_emotion=unknown 기대. 실제: {params.get('customer_emotion')}"
+        assert params.get("priority") == "unknown", \
+            f"priority=unknown 기대 (low fallback 차단). 실제: {params.get('priority')}"
+
+
+@pytest.mark.asyncio
+async def test_corrections_to_analysis_applied_before_save(monkeypatch):
+    """reviewer correct_analysis → save_reviewed_analysis 가 보정본을 저장.
+
+    reviewer_agent_node 가 corrected_analysis 를 state['analysis_result'] 로 반환하므로
+    save_reviewed_analysis 는 별도 적용 없이 state 만 읽어도 보정본이 저장된다.
+    """
+    from app.agents.post_call.agent import PostCallAgent
+    import app.agents.post_call.nodes.action_executor_node as exec_node
+
+    _patch_full_catalog(monkeypatch)
+    _patch_load_context(monkeypatch, transcripts=[
+        {"role": "customer", "text": "환불"},
+        {"role": "agent", "text": "확인"},
+    ])
+
+    # reviewer: handoff_notes 를 None 으로 보정 후 correctable
+    fake_reviewer_llm = MagicMock()
+    fake_reviewer_llm.generate_with_tools = AsyncMock(side_effect=[
+        {
+            "tool_calls": [
+                {"id": "c", "name": "correct_analysis", "arguments": {
+                    "field": "summary.handoff_notes",
+                    "new_value": None,
+                    "reason": "transcript 에 근거 없음",
+                    "transcript_evidence": "",
+                }},
+                {"id": "f", "name": "finalize_review",
+                 "arguments": {"verdict": "correctable", "summary_reason": "보정"}},
+            ],
+            "text": "", "raw_message": None,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "model": "mock"},
+        },
+    ])
+    monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer_llm)
+
+    saved_summaries: list[dict] = []
+    import app.agents.post_call.nodes.save_result_node as save_mod
+    fake_summary_repo = MagicMock()
+
+    async def capture_save(call_id, summary, *, tenant_id):
+        saved_summaries.append(dict(summary))
+
+    fake_summary_repo.save_summary = AsyncMock(side_effect=capture_save)
+    monkeypatch.setattr(save_mod, "_summary_repo", fake_summary_repo)
+
+    fake_executor = MagicMock()
+    fake_executor.execute_actions = AsyncMock(return_value=[])
+    monkeypatch.setattr(exec_node, "_executor", fake_executor)
+
+    agent = PostCallAgent()
+    await agent.run("h-correct-001", trigger="call_ended", tenant_id="t-h")
+
+    # save_reviewed_analysis 가 적어도 1번은 호출됐고, 저장된 summary 의 handoff_notes 가 None.
+    assert len(saved_summaries) >= 1, "save_summary 호출 누락"
+    # 보정 적용 확인 — reviewer 가 handoff_notes 를 None 으로 set 했으므로 저장본도 None
+    last = saved_summaries[-1]
+    assert last.get("handoff_notes") in (None, ""), \
+        f"보정 적용 실패. handoff_notes={last.get('handoff_notes')!r}"

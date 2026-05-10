@@ -22,12 +22,16 @@ SaveMode = Literal["intermediate", "final"]
 async def save_result_node(state: PostCallAgentState, mode: SaveMode = "final") -> dict:
     """분석 결과 / 액션 결과를 영속화한다.
 
-    mode=intermediate
-        analysis_planner_agent 직후 호출. summary + voc_analysis + dashboard 부분 upsert.
-        executed_actions 는 아직 없으므로 mcp_action_logs 미저장.
-        실패해도 다음 단계 (reviewer) 진행 가능하도록 절대 raise 안 함.
+    mode=intermediate (= save_reviewed_analysis)
+        reviewer 통과 직후 호출. 보정된 analysis_result 를 call_summaries / voc_analyses
+        로 영속화. 실패해도 다음 단계 (action_executor) 진행 가능하도록 절대 raise 안 함.
     mode=final
-        executor 또는 human_queue 직후 호출. mcp_action_logs + dashboard 최종 upsert.
+        executor 또는 human_queue + auto_action_executor 직후 호출.
+        mcp_action_logs + dashboard 최종 upsert.
+
+        review_verdict=='fail' 인 경우 summary / voc 는 save_reviewed_analysis 단계를
+        거치지 않았으므로 final 단계에서도 저장하지 않는다 (검토 통과 분석만 저장).
+        대신 mcp_action_logs (admin alert / Notion 마킹된 row) + dashboard 만 갱신.
     """
     call_id = state["call_id"]
     normalized_state = normalize_post_call_result(dict(state))
@@ -35,10 +39,16 @@ async def save_result_node(state: PostCallAgentState, mode: SaveMode = "final") 
 
     save_label_prefix = f"save_{mode}"
 
-    coros: list[tuple[str, object]] = [
-        ("summary", _maybe_save_summary(call_id, normalized_state)),
-        ("voc", _maybe_save_voc(call_id, normalized_state)),
-    ]
+    # fail max 도달 시 분석 본문 영속화 차단 (사용자 핵심 의도).
+    fail_block_analysis = (
+        mode == "final"
+        and (normalized_state.get("review_verdict") or "") == "fail"
+    )
+
+    coros: list[tuple[str, object]] = []
+    if not fail_block_analysis:
+        coros.append(("summary", _maybe_save_summary(call_id, normalized_state)))
+        coros.append(("voc", _maybe_save_voc(call_id, normalized_state)))
     if mode == "final":
         coros.append(("action_log", _maybe_save_actions(call_id, normalized_state)))
 
@@ -56,19 +66,26 @@ async def save_result_node(state: PostCallAgentState, mode: SaveMode = "final") 
 
     planner_telemetry = normalized_state.get("analysis_planner_telemetry")
     reviewer_telemetry = normalized_state.get("reviewer_telemetry")
+    # B1: fail max 시 분석 본문은 dashboard 에도 노출하지 않는다.
+    # action_plan / executed_actions / 텔레메트리는 그대로 — 운영자가 fail 발생 자체는 봐야 함.
+    payload_summary = None if fail_block_analysis else normalized_state.get("summary")
+    payload_voc = None if fail_block_analysis else normalized_state.get("voc_analysis")
+    payload_priority = None if fail_block_analysis else normalized_state.get("priority_result")
+    payload_analysis = None if fail_block_analysis else normalized_state.get("analysis_result")
+
     payload = {
         "call_id": call_id,
         "tenant_id": normalized_state["tenant_id"],
         "trigger": normalized_state["trigger"],
-        "summary": normalized_state.get("summary"),
-        "voc_analysis": normalized_state.get("voc_analysis"),
-        "priority_result": normalized_state.get("priority_result"),
+        "summary": payload_summary,
+        "voc_analysis": payload_voc,
+        "priority_result": payload_priority,
         "action_plan": normalized_state.get("action_plan"),
         "executed_actions": normalized_state.get("executed_actions", []),
         "errors": errors,
         "partial_success": final_partial_success,
         # ── Agent 출력 ──────────────────────────────────────────────────────
-        "analysis_result": normalized_state.get("analysis_result"),
+        "analysis_result": payload_analysis,
         "proposed_actions": normalized_state.get("proposed_actions", []),
         "review_result": normalized_state.get("review_result"),
         "review_verdict": normalized_state.get("review_verdict"),
@@ -148,7 +165,30 @@ async def save_result_node(state: PostCallAgentState, mode: SaveMode = "final") 
 
 
 async def save_intermediate_node(state: PostCallAgentState) -> dict:
-    """LangGraph 노드 어댑터 — save_result_node(mode='intermediate')."""
+    """LangGraph 노드 어댑터 — save_result_node(mode='intermediate').
+
+    DEPRECATED: 그래프에서는 더 이상 호출되지 않는다 (reviewer 전 저장 제거).
+    호출자/테스트 호환을 위해 alias 로 보존. 새 코드는 save_reviewed_analysis_node
+    또는 save_final_node 를 사용한다.
+    """
+    return await save_result_node(state, mode="intermediate")
+
+
+async def save_reviewed_analysis_node(state: PostCallAgentState) -> dict:
+    """reviewer 통과 (pass / correctable) 시 보정된 분석을 영속화한다.
+
+    state["analysis_result"] 는 reviewer 가 correct_analysis 도구로 보정한 본문
+    (reviewer_agent_node 가 corrected_analysis 를 그대로 반환). 별도 적용 단계
+    필요 없음.
+
+    저장 대상:
+      - call_summaries  (ON CONFLICT upsert)
+      - voc_analyses    (ON CONFLICT upsert)
+      - dashboards (in-memory)  — corrections_to_analysis 메타도 함께
+      - mcp_action_logs 는 save_final 에서 처리 (executor 가 아직 안 돌았음)
+
+    fail (max retry 초과) 분기에서는 절대 호출되지 않는다 — 잘못된 분석 저장 차단.
+    """
     return await save_result_node(state, mode="intermediate")
 
 
