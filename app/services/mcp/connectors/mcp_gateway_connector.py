@@ -39,7 +39,7 @@ _TOOL_NAME_MAP: dict[tuple[str, str], str] = {
     ("jira",               "create_jira_issue"):         "jira.create_jira_issue",
     ("jira",               "create_voc_issue"):          "jira.create_jira_issue",
     ("notion",             "create_notion_call_record"): "notion.create_notion_call_record",
-    ("notion",             "create_notion_voc_record"):  "notion.create_notion_call_record",
+    ("notion",             "create_notion_voc_record"):  "notion.create_notion_voc_record",
     ("sms",                "send_voc_receipt_sms"):      "sms.send_voc_receipt_sms",
     ("sms",                "send_callback_sms"):         "sms.send_callback_sms",
     ("sms",                "send_reservation_confirmation"): "sms.send_callback_sms",

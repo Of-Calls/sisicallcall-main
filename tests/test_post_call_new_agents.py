@@ -2199,8 +2199,10 @@ async def test_idempotency_race_condition_blocks_double_send(monkeypatch):
                 "request_payload": {"idempotency_token": a.get("idempotency_token")},
             })
 
-    monkeypatch.setattr(executor_mod, "find_successful_action", fake_find)
-    monkeypatch.setattr(log_repo, "find_successful_action", fake_find)
+    # executor 는 find_existing_action 사용 — log_repo 는 backward compat 으로
+    # find_successful_action 도 유지하나 본 테스트는 새 함수 경로만 패치하면 충분.
+    monkeypatch.setattr(executor_mod, "find_existing_action", fake_find)
+    monkeypatch.setattr(log_repo, "find_existing_action", fake_find)
 
     # gateway mock — 호출되면 sent_count 증가 + success 반환
     from app.services.mcp.connectors import mcp_gateway_connector as mgc

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.agents.post_call.actions.result import action_failed, action_skipped, action_success
-from app.repositories.mcp_action_log_repo import find_successful_action
+from app.repositories.mcp_action_log_repo import find_existing_action
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -71,28 +71,38 @@ class ActionExecutor:
         idempotency_token = action.get("idempotency_token")
 
         # ── idempotency check ───────────────────────────────────────────────
-        # token 이 있으면 (call_id, action_type, tool, token) 4-tuple 매칭 — 같은
-        # action_type 이라도 의도가 다르면 token 이 달라 별개 액션으로 처리됨.
-        # token 이 없으면 (call_id, action_type, tool) 3-tuple — 옛 동작 유지.
-        previous = await find_successful_action(
+        # status 무관 매칭 — 같은 (call_id, action_type, tool, token) row 가
+        # 하나라도 있으면 (success/skipped/failed 무관) 차단.
+        # 이유: sms_config_missing / oauth_expired 등 환경 이슈로 skipped 된
+        # 케이스도 재시도 의미 없음. 한 통화에서 같은 의도의 액션은 1 row 만.
+        # token 이 None 이면 (call_id, action_type, tool) 3-tuple 매칭.
+        previous = await find_existing_action(
             call_id=call_id,
             action_type=action_type,
             tool=tool_key,
             idempotency_token=idempotency_token,
         )
         if previous:
+            prev_status = previous.get("status") or "unknown"
+            reason = (
+                "already_succeeded"
+                if prev_status == "success"
+                else f"already_attempted({prev_status})"
+            )
             logger.info(
-                "action idempotency skip call_id=%s tool=%s action_type=%s token=%s previous_external_id=%s",
+                "action idempotency skip call_id=%s tool=%s action_type=%s token=%s "
+                "previous_status=%s previous_external_id=%s",
                 call_id,
                 tool_key,
                 action_type,
                 idempotency_token,
+                prev_status,
                 previous.get("external_id"),
             )
             skip_result: dict = {
-                "idempotency": "already_succeeded",
+                "idempotency": reason,
                 "previous_external_id": previous.get("external_id"),
-                "previous_status": previous.get("status"),
+                "previous_status": prev_status,
                 "source": "mcp_server",
                 "via_mcp": True,
                 "execution_mode": "mcp",
@@ -102,7 +112,7 @@ class ActionExecutor:
                 skip_result["mcp_tool"] = resolved_mcp_tool
             return action_skipped(
                 action,
-                reason="already_succeeded",
+                reason=reason,
                 result=skip_result,
             )
 

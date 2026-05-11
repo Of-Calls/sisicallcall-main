@@ -185,7 +185,9 @@ REVIEW_TOOLS_OPENAI: list[dict] = [
             "name": "finalize_review",
             "description": (
                 "검토를 종료합니다. 모든 액션 결정과 분석 교정 후 반드시 호출하세요. "
-                "verdict 는 결정에 따라 자동 산출됩니다."
+                "verdict 는 결정에 따라 자동 산출됩니다. "
+                "confidence (0.0~1.0) 는 reviewer 자체 판정 신뢰도 — R4 자동 강등에 사용. "
+                "0.6 미만 + verdict=pass → 자동 correctable 강등, 0.4 미만 → 자동 fail 강등."
             ),
             "parameters": {
                 "type": "object",
@@ -196,6 +198,17 @@ REVIEW_TOOLS_OPENAI: list[dict] = [
                         "description": "최종 verdict (없으면 자동 산출)",
                     },
                     "summary_reason": {"type": "string"},
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": (
+                            "reviewer 자체 판정 신뢰도 (0.0~1.0). "
+                            "1.0=완벽 일치, 0.8=명확하나 일부 모호, 0.6=핵심 맞으나 보정 필요, "
+                            "0.4=신뢰 부족, 0.2=심각한 grounding 의심, 0.0=명확히 어긋남. "
+                            "생략 시 1.0 으로 간주 (강등 없음, 기존 호환)."
+                        ),
+                    },
                 },
                 "required": ["summary_reason"],
             },

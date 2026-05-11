@@ -25,6 +25,7 @@ from app.repositories.mcp_action_log_repo import (
     MCPActionLogRepository,
     save_action_logs,
     find_successful_action,
+    find_existing_action,
     get_action_logs_by_call_id,
     get_action_logs_by_call_id_for_tenant,
     get_action_logs,
@@ -71,6 +72,7 @@ __all__ = [
     # mcp_action_log
     "save_action_logs",
     "find_successful_action",
+    "find_existing_action",
     "get_action_logs_by_call_id",
     "get_action_logs_by_call_id_for_tenant",
     "get_action_logs",

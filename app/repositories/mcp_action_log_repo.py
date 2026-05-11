@@ -14,8 +14,13 @@ db/init/09_mcp_action_logs.sql 참조:
   status, external_id, error_message, created_at, updated_at
 
 idempotency 정책:
-- application-level: ``find_successful_action(call_id, action_type, tool, idempotency_token?)``
-  이 SELECT 로 성공 row 를 찾고 executor 가 skip 처리.
+- application-level: ``find_existing_action(call_id, action_type, tool, idempotency_token?)``
+  이 SELECT 로 같은 의도의 row 를 찾고 executor 가 skip 처리. status 무관 매칭 —
+  success/skipped/failed 어느 상태든 같은 token row 가 1건이라도 있으면 차단.
+  이유: sms_config_missing / oauth_expired 등 환경 이슈로 skipped 된 케이스도
+  재시도 의미 없음. 한 통화에서 같은 의도의 액션은 1 row 만.
+- ``find_successful_action`` 은 status='success' 만 매칭 — backward compat 유지용.
+  새 호출자는 ``find_existing_action`` 사용 권장.
 - token 이 주어지면 ``request_payload->>'idempotency_token'`` JSONB 매치도 함께
   적용 — 같은 action_type 이라도 의도가 다르면 별개로 인식됨 (다중 의도 통화).
 - DB UNIQUE 제약은 없음. 동시 호출 시 race 가능성은 application-level 의 한계로
@@ -263,6 +268,77 @@ async def find_successful_action(
             await conn.close()
 
 
+async def find_existing_action(
+    call_id: str,
+    action_type: str,
+    tool: str,
+    idempotency_token: str | None = None,
+) -> dict | None:
+    """동일 (call_id, action_type, tool) + token 의 row 조회. status 무관.
+
+    한 통화에서 같은 의도의 액션이 이미 DB 에 기록되어 있으면 (success/skipped/failed
+    무관) 재시도 의미 없음 — executor 가 skip 처리. ``find_successful_action`` 과의
+    차이는 status 필터 부재 — sms_config_missing 같은 환경 이슈로 skipped 된 row
+    도 차단 대상.
+
+    idempotency_token 이 주어지면 ``request_payload->>'idempotency_token'`` JSONB
+    매치도 함께 적용. None 이면 (call_id, action_type, tool) 3-tuple 만 매칭.
+    """
+    conn = None
+    try:
+        conn = await asyncpg.connect(_database_url())
+        if idempotency_token is None:
+            row = await conn.fetchrow(
+                """
+                SELECT id, call_id, tenant_id, action_type, tool_name,
+                       request_payload, response_payload, status,
+                       external_id, error_message, created_at, updated_at
+                FROM mcp_action_logs
+                WHERE call_id = $1
+                  AND action_type = $2
+                  AND tool_name = $3
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                call_id,
+                action_type,
+                tool,
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT id, call_id, tenant_id, action_type, tool_name,
+                       request_payload, response_payload, status,
+                       external_id, error_message, created_at, updated_at
+                FROM mcp_action_logs
+                WHERE call_id = $1
+                  AND action_type = $2
+                  AND tool_name = $3
+                  AND request_payload->>'idempotency_token' = $4
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                call_id,
+                action_type,
+                tool,
+                idempotency_token,
+            )
+        return _row_to_log_entry(row) if row is not None else None
+    except Exception as exc:
+        logger.warning(
+            "action_logs db find_existing failed call_id=%s action_type=%s tool=%s token=%s err=%s",
+            call_id,
+            action_type,
+            tool,
+            idempotency_token,
+            exc,
+        )
+        return None
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
 async def get_action_logs_by_call_id(call_id: str) -> list[dict]:
     conn = None
     try:
@@ -404,4 +480,18 @@ class MCPActionLogRepository:
             call_id=call_id,
             action_type=action_type,
             tool=tool,
+        )
+
+    async def find_existing_action(
+        self,
+        call_id: str,
+        action_type: str,
+        tool: str,
+        idempotency_token: str | None = None,
+    ) -> dict | None:
+        return await find_existing_action(
+            call_id=call_id,
+            action_type=action_type,
+            tool=tool,
+            idempotency_token=idempotency_token,
         )

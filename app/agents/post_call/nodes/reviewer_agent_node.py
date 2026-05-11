@@ -38,7 +38,43 @@ _SYSTEM_PROMPT = """당신은 콜센터 후처리 분석/액션 검증 전문가
 1. analysis_planner_agent 가 생성한 분석 결과가 transcript 에 충분히 근거하는지 확인
 2. proposed_actions 가 통화 내용에 적절한지 검토
 3. 잘못된 분석은 correct_analysis 로 교정, 부적절한 액션은 reject_action / correct_action 으로 처리
-4. 모든 결정이 끝나면 반드시 finalize_review 를 호출하여 종료
+4. 모든 결정이 끝나면 반드시 finalize_review 를 confidence 와 함께 호출하여 종료
+
+[fail 판정 기준 — 다음 중 하나라도 해당되면 verdict=fail]
+
+R1. Grounding 위반
+  - 분석 필드 (summary / customer_emotion / customer_intent / resolution_status /
+    handoff_notes) 가 transcript 에 근거 없거나 모순된다.
+  - 예: transcript 에 "환불" 단어가 한 번도 없는데 customer_intent="환불 요청"
+  - 예: transcript 에 분노/짜증 발화가 전혀 없는데 customer_emotion="angry"
+  - 단, neutral / low / resolved 같은 *기본값* 은 강한 반대 증거가 없으면 grounding
+    위반이 아니다 — 명시되지 않으면 기본값이 정답.
+
+R2. Action mismatch
+  - propose 된 action 의 핵심 params 가 transcript 내용과 불일치
+  - 예: customer 가 "내일 오후 3시" 명시 → preferred_time 이 "오전 10시"
+  - 예: 단순 운영시간 문의에 create_jira_ticket / send_email_supervisor 등 과한 액션
+  - 예: 콜백 요청 없는 통화에 schedule_callback
+
+R3. Risk escalation
+  - 분석/액션 실행 시 고객/회사에 실질적 위험이 있다.
+  - 예: 잘못된 환불 자동 처리 결정, 본인인증 우회 권고, 잘못된 supervisor email 발송
+  - 예: 위험한 외부 시스템 변경을 자동 진행하려는 시도
+  - 이 경우 escalate_to_human + finalize_review(verdict=fail) 를 함께 호출.
+
+R4. Self-confidence 부족
+  - 위 R1~R3 모두 통과해 보여도, reviewer 자체 판단 신뢰도가 낮으면 강등.
+  - confidence < 0.6 + verdict=pass → 시스템이 자동으로 correctable 로 강등.
+  - confidence < 0.4 → 시스템이 자동으로 fail 강등.
+
+[confidence 산정 가이드]
+- 1.0: 분석/액션이 transcript 와 완벽 일치, 의심 여지 없음
+- 0.8: 명확하지만 일부 필드가 약간 모호 (대체로 신뢰 가능)
+- 0.6: 핵심은 맞으나 일부 보정 필요 (correctable 경계)
+- 0.4: 신뢰 부족 — analysis_planner 재시도 권장
+- 0.2: 심각한 grounding 의심
+- 0.0: 명확히 어긋남
+finalize_review 호출 시 반드시 confidence (0.0~1.0) 를 함께 전달하라.
 
 [보정 규칙 — 매우 중요]
 - 분석 결과가 transcript 와 모순되지 않으면 correct_analysis 를 호출하지 말고 바로
@@ -66,23 +102,25 @@ _SYSTEM_PROMPT = """당신은 콜센터 후처리 분석/액션 검증 전문가
 - 부적절한 액션 → reject_action
 - 액션 params 일부만 잘못 → correct_action
 - 위험하거나 자동 판단 불가 → escalate_to_human + finalize_review(fail)
-- 정상이면 모두 approve_action 후 finalize_review(pass)
+- 정상이면 모두 approve_action 후 finalize_review(pass, confidence=0.0~1.0)
 
 [reason 작성 규칙]
 - approve_action / reject_action 의 reason 은 transcript 사실관계 또는 분석 결과
   인용에 기반한 한 문장. 일반 정책 문구("단순 문의이므로 부적절") 금지.
   예: "고객이 '환불 안 해주면 민원 넣을게요' 발화 — 강한 escalation, slack 알림 정당".
 
-[같은 action_type 의 다중 호출 — 정상]
-- 한 통화에 여러 의도가 있으면 같은 action_type 도 여러 번 propose 될 수 있다.
-  예: VOC 가 두 종류 (불만 + 환불) → propose_create_jira_ticket 두 번.
-- 의도가 다르면 (params 의 핵심 필드가 다르면) 둘 다 approve.
-- params 가 사실상 동일하면 (같은 메시지/같은 시간 등) 두 번째는 reject.
-- 시스템이 idempotency_token 으로 정말 동일한 호출은 자동 차단하므로 검토 부담 낮음.
+[같은 action_type 의 다중 호출 — 강한 제한]
+- 안내성 액션 (send_voc_receipt_sms / send_slack_alert / send_manager_email) 은
+  통화당 1건만 정당. 메시지 본문이 다르다는 이유로 2건 이상 approve 하지 마라 —
+  의도가 본질적으로 같으면 첫 호출만 approve, 나머지는 reject.
+- 의도가 본질적으로 다른 경우 (예: 별개 VOC 사안 2건 → create_jira_ticket × 2)
+  에만 다중 approve. 식별 필드 (summary / voc_content 등) 가 분명히 달라야 함.
+- 시스템이 idempotency 로 안내성 액션의 2번째+ 호출은 어차피 skip 하지만, reviewer
+  단계에서 부적절한 중복은 reject 처리해서 telemetry 와 사용자 피드백 일관성 유지.
 
 [빠른 종료 가이드 — V3-1/3]
 - proposed_actions 가 비어있고 분석 결과에 transcript 와 어긋나는 명백한 오류가 없다면,
-  첫 step 에서 finalize_review 호출 후 즉시 종료하세요.
+  첫 step 에서 finalize_review(verdict=pass, confidence=0.9~1.0) 호출 후 즉시 종료.
 - 검토할 액션이 없는데 verify_field_grounding 으로 시간을 낭비하지 마세요.
 
 도구 호출 횟수는 step 당 여러 개 가능하지만 효율적으로. 최대 5 step 안에 finalize 하세요."""
@@ -193,6 +231,40 @@ def _sync_action_priorities(actions: list[dict], new_priority: str) -> list[dict
             a2["params"] = params
         out.append(a2)
     return out
+
+
+# ── R4: confidence 기반 verdict 강등 ────────────────────────────────────────
+def _apply_confidence_downgrade(verdict: str, confidence: float | None) -> str:
+    """reviewer 자체 신뢰도가 낮으면 verdict 를 한 단계씩 강등.
+
+    - confidence < 0.4 → fail (verdict 가 무엇이든 강등, escalate)
+    - confidence < 0.6 + verdict=pass → correctable
+    - 그 외 또는 confidence=None → verdict 그대로
+    """
+    if verdict == "fail" or confidence is None:
+        return verdict
+    if confidence < 0.4:
+        return "fail"
+    if confidence < 0.6 and verdict == "pass":
+        return "correctable"
+    return verdict
+
+
+def _coerce_confidence(raw) -> float | None:
+    """LLM 이 전달한 confidence 를 0.0~1.0 float 로 정규화. 잘못된 값은 None."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if v != v:  # NaN
+        return None
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
 
 
 def _post_call_llm_mode() -> str:
@@ -355,6 +427,7 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
     finalize_called = False
     explicit_verdict: str | None = None
     finalize_reason: str = ""
+    finalize_confidence: float | None = None
 
     transcripts_text = _format_transcripts(transcripts)
     analysis_text = json.dumps(analysis, ensure_ascii=False, indent=2)
@@ -550,6 +623,7 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
                 finalize_called = True
                 explicit_verdict = args.get("verdict")
                 finalize_reason = str(args.get("summary_reason") or "")
+                finalize_confidence = _coerce_confidence(args.get("confidence"))
                 obs = "review_finalized"
             else:
                 obs = f"unknown_tool: {name}"
@@ -615,6 +689,17 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
     else:
         verdict = "pass"
 
+    # ── R4: confidence 기반 자동 강등 ────────────────────────────────────────
+    original_verdict = verdict
+    verdict = _apply_confidence_downgrade(verdict, finalize_confidence)
+    if verdict != original_verdict:
+        logger.info(
+            "reviewer verdict downgrade call_id=%s original=%s new=%s confidence=%.2f",
+            call_id, original_verdict, verdict, finalize_confidence or 0.0,
+        )
+        if verdict == "fail" and not escalate_reason:
+            escalate_reason = f"low_confidence={finalize_confidence:.2f}"
+
     if verdict == "fail":
         approved_actions = []  # fail 시 LLM-proposed 외부 액션 차단
         # auto_injected 액션은 reviewer 와 무관 (회사 DB 기록 무조건 보존).
@@ -657,6 +742,8 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
 
     review_result = {
         "verdict": verdict,
+        "original_verdict": original_verdict,
+        "confidence": finalize_confidence,
         "approved_actions": approved_actions,
         "rejected_actions": rejected_actions,
         "corrections_to_analysis": analysis_corrections,
@@ -681,10 +768,12 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
 
     logger.info(
         "post_call telemetry node=reviewer call_id=%s tenant=%s "
-        "verdict=%s steps=%d max_reached=%s tokens=%d latency_ms=%d "
-        "approved=%d rejected=%d corrections=%d dropped=%d auto_injected=%d",
+        "verdict=%s original_verdict=%s confidence=%s steps=%d max_reached=%s "
+        "tokens=%d latency_ms=%d approved=%d rejected=%d corrections=%d dropped=%d auto_injected=%d",
         call_id, tenant_id,
-        verdict, steps_used, forced_close,
+        verdict, original_verdict,
+        f"{finalize_confidence:.2f}" if finalize_confidence is not None else "none",
+        steps_used, forced_close,
         tokens_total["total"], latency_ms,
         len(approved_actions), len(rejected_actions),
         len(analysis_corrections), len(corrections_dropped),

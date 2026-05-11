@@ -129,6 +129,84 @@ SCENARIOS: dict[str, dict] = {
             {"role": "agent", "text": "각각 별도 티켓으로 등록해서 처리 진행 상황 따로 안내드리겠습니다."},
         ],
     },
+    "e2e-notion-split-001": {
+        # call_record / voc_record 데이터 분리 검증용 — angry+high (voc_record 도 주입)
+        "scenario": "notion_split_verify",
+        "caller_number": "010-7777-7777",
+        "branch_stats": {"faq": 0, "task": 0, "escalation": 1},
+        "transcripts": [
+            {"role": "customer", "text": "지난주 결제한 상품이 도착하지도 않았는데 환불도 안 해주시네요. 정말 답답합니다."},
+            {"role": "agent", "text": "고객님 죄송합니다. 배송 추적부터 확인해드리겠습니다."},
+            {"role": "customer", "text": "이미 두 번이나 전화했어요. 매번 확인하겠다고만 하고 진행이 없어요."},
+            {"role": "agent", "text": "이번엔 즉시 운영팀에 에스컬레이션 처리해드리겠습니다."},
+            {"role": "customer", "text": "환불 처리 안 되면 카드사 분쟁 신청하고 소비자보호원에 신고할 거예요."},
+            {"role": "agent", "text": "팀장에게 즉시 보고드리고 오늘 안에 답변 드리겠습니다."},
+        ],
+    },
+    "e2e-notion-split-002": {
+        # call_record 단독 검증용 — neutral (voc_record 미주입)
+        "scenario": "notion_split_call_only",
+        "caller_number": "010-3333-3333",
+        "branch_stats": {"faq": 1, "task": 0, "escalation": 0},
+        "transcripts": [
+            {"role": "customer", "text": "주말 영업시간 알려주세요."},
+            {"role": "agent", "text": "토요일은 오전 10시부터 오후 4시, 일요일은 휴무입니다."},
+            {"role": "customer", "text": "감사합니다."},
+        ],
+    },
+    "e2e-verify-001": {
+        # 검증용: 명확히 다른 의도 (교환 + 멤버십 문의 + 콜백) — 중복 발송 0 확인
+        "scenario": "verify_idempotency",
+        "caller_number": "010-9999-8888",
+        "branch_stats": {"faq": 1, "task": 1, "escalation": 0},
+        "transcripts": [
+            {"role": "customer", "text": "안녕하세요. 두 가지 문의가 있어서 전화 드렸어요."},
+            {"role": "agent", "text": "네 고객님, 말씀해주세요."},
+            {"role": "customer", "text": "첫 번째는 지난주 주문한 운동화가 사이즈가 안 맞아서 교환하고 싶어요. 250mm로 주문했는데 245mm가 왔어요."},
+            {"role": "agent", "text": "사이즈 오배송 건 죄송합니다. 교환 처리 도와드리겠습니다."},
+            {"role": "customer", "text": "두 번째는 별개 건인데, 멤버십 등급 업그레이드 조건이 어떻게 되는지 궁금해요."},
+            {"role": "agent", "text": "멤버십 등급은 누적 구매 금액 50만원 이상이면 실버, 200만원 이상이면 골드입니다."},
+            {"role": "customer", "text": "감사합니다. 그리고 교환 건은 지금 회의 중이라 자세히 못 말씀드려서, 내일 오전 10시에 다시 전화 주실 수 있을까요?"},
+            {"role": "agent", "text": "010-9999-8888 으로 내일 10:00 콜백 예약 도와드리겠습니다."},
+            {"role": "customer", "text": "네 부탁드려요."},
+        ],
+    },
+    "e2e-conf-001": {
+        # confidence 강등 검증용 — 의도가 모호한 transcript.
+        # 환불 같기도 하고 단순 문의 같기도 함. reviewer 가 confidence<0.6 이면
+        # verdict 가 pass → correctable 로 자동 강등되는지 확인.
+        "scenario": "ambiguous_intent_low_confidence",
+        "caller_number": "010-0000-0000",
+        "branch_stats": {"faq": 0, "task": 0, "escalation": 0},
+        "transcripts": [
+            {"role": "customer", "text": "저번에 산 거 있는데, 그게 좀 그래요."},
+            {"role": "agent", "text": "어떤 부분이 불편하셨을까요?"},
+            {"role": "customer", "text": "아 음... 정확히는 모르겠는데 그냥 좀."},
+            {"role": "agent", "text": "혹시 환불을 원하시나요?"},
+            {"role": "customer", "text": "꼭 그런 건 아니고... 일단 알겠습니다."},
+        ],
+    },
+    "e2e-complex-001": {
+        # 종합 시나리오: 강한 불만 + 본인인증 + 콜백 + 다중 VOC + 상담원 연결
+        # 기대 액션: Notion(call+voc×2), SMS×1, schedule_callback, jira×2, slack, email
+        "scenario": "complex_multi_intent",
+        "caller_number": "010-1234-5678",
+        "branch_stats": {"faq": 0, "task": 1, "escalation": 1},
+        "transcripts": [
+            {"role": "customer", "text": "지난주 주문한 가방인데, 일단 두 가지 문제가 있어요. 첫째, 같이 주문한 지갑이 박스에 안 들어있었어요."},
+            {"role": "agent", "text": "정말 죄송합니다. 누락된 지갑 즉시 재발송 처리해드리겠습니다."},
+            {"role": "customer", "text": "두 번째 문제는, 광고에서 본 가격은 8만원이었는데 결제는 12만원으로 빠졌어요. 4만원 차액 환불해주세요."},
+            {"role": "agent", "text": "광고 가격과 다른 청구 건도 별도로 운영팀에 신고하고 차액 환불 처리하겠습니다."},
+            {"role": "customer", "text": "그리고 환불 처리 진행 상황 확인하려면 본인 인증을 해야 한다고 하는데, 지금 회의 들어가야 해서 시간이 없어요."},
+            {"role": "agent", "text": "괜찮습니다. 본인 인증은 콜백 시간에 진행하시면 됩니다. 언제 다시 통화 가능하실까요?"},
+            {"role": "customer", "text": "내일 오후 3시에 다시 전화 주세요. 010-1234-5678입니다."},
+            {"role": "agent", "text": "010-1234-5678 으로 내일 15:00 콜백 예약 도와드리겠습니다."},
+            {"role": "customer", "text": "그런데 환불 처리 안 되면 카드사 분쟁 신청하고 소비자보호원에도 신고할 거예요. 정말 황당하네요."},
+            {"role": "agent", "text": "최우선으로 처리하겠습니다. 팀장에게 즉시 보고하고 콜백 시 결과 안내드리겠습니다."},
+            {"role": "customer", "text": "꼭 부탁드려요. 상담원 연결도 가능하면 해주세요."},
+            {"role": "agent", "text": "네, 슈퍼바이저에게 인계하고 콜백 시 직접 통화 가능하도록 준비하겠습니다."},
+        ],
+    },
     "e2e-009": {
         # fail+auto 검증용 — angry+high 시나리오 (force_fail 스크립트로 retry max 도달 유도)
         "scenario": "fail_then_auto_only",
