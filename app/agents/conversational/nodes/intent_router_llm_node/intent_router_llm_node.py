@@ -11,6 +11,9 @@ _HISTORY_TURN_LIMIT = 6  # 직전 3턴 (user+assistant 합쳐 6개 항목)
 
 _VALID_INTENTS = {"faq", "task", "auth", "vision", "escalation", "repeat"}
 
+_ESCALATION_PERSON_KW = ("상담원", "책임자", "매니저", "점장", "직원")
+_ESCALATION_ACTION_KW = ("연결", "바꿔", "돌려", "넘겨", "불러")
+
 
 def _format_history(history: list) -> str:
     if not history:
@@ -43,6 +46,15 @@ async def intent_router_llm_node(state: CallState) -> dict:
                     f"[intent_router] active vision (status={vstatus}) → vision 강제"
                 )
                 return {"intent": "vision"}
+
+    # 사용자 명시적 escalation 발화는 LLM 분류 우회. query_refine 의 paraphrase 가
+    # 강한 신호어를 약화시켜도 raw user_text 에서 검출. 사람 명사 + 연결 동사 동시
+    # 존재 시에만 트리거 (false positive 방지).
+    raw_text = state.get("user_text", "")
+    if any(kw in raw_text for kw in _ESCALATION_PERSON_KW) and \
+       any(kw in raw_text for kw in _ESCALATION_ACTION_KW):
+        print(f"[intent_router] escalation 키워드 매칭 (raw='{raw_text}') → LLM 우회")
+        return {"intent": "escalation"}
 
     system_prompt = build_system_prompt(tenant_name, tenant_industry)
     user_message = f"[이전 대화]\n{_format_history(history)}\n\n[현재 사용자 발화]\n{query}"
